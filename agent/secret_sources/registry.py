@@ -41,6 +41,7 @@ _BUILTIN_SOURCES = (
     ("agent.secret_sources.bitwarden", "BitwardenSource", "Bitwarden"),
     ("agent.secret_sources.onepassword", "OnePasswordSource", "1Password"),
     ("agent.secret_sources.command", "CommandSource", "command"),
+    ("agent.secret_sources.infisical", "InfisicalSource", "Infisical"),
 )
 
 
