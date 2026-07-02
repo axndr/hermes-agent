@@ -271,6 +271,15 @@ def _ensure_builtin_sources() -> None:
                 "Failed to register bundled command secret source",
                 exc_info=True,
             )
+        try:
+            from agent.secret_sources.infisical import InfisicalSource
+
+            register_source(InfisicalSource(), builtin=True)
+        except Exception:  # noqa: BLE001 — never block startup
+            logger.warning(
+                "Failed to register bundled Infisical secret source",
+                exc_info=True,
+            )
 
 
 def _reset_registry_for_tests() -> None:

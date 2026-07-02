@@ -3867,6 +3867,21 @@ DEFAULT_CONFIG = {
             # start.  Flip to false to let .env / shell exports win locally.
             "override_existing": True,
         },
+        "infisical": {
+            # Bulk secret source for Infisical projects/folders. Bootstrap
+            # credentials remain in .env; fetched values are applied by the
+            # shared secret-source orchestrator with provenance/conflict guards.
+            "enabled": False,
+            "client_id_env": "INFISICAL_CLIENT_ID",
+            "client_secret_env": "INFISICAL_CLIENT_SECRET",
+            "token_env": "INFISICAL_TOKEN",
+            "project_id": "",
+            "environment": "",
+            "secret_path": "/",
+            "cache_ttl_seconds": 300,
+            "override_existing": True,
+            "server_url": "",
+        },
     },
 
     # Paste collapse thresholds (TUI + CLI).
