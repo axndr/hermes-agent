@@ -6,6 +6,7 @@ Supported:
 
 - [Bitwarden Secrets Manager](./bitwarden) — `bws` CLI, lazy-installed, free tier works.
 - [1Password](./onepassword) — `op://` references via the official `op` CLI; service-account or desktop session auth.
+- [Infisical](./infisical) — `infisical` CLI, machine-identity auth, cloud or self-hosted.
 - [Command helper](./command) — any CLI vault (`keepassxc-cli`, `secret-tool`, `pass`, custom scripts) via a user-configured helper that prints `KEY=VALUE` lines.
 
 ## Multiple sources at once
