@@ -77,6 +77,14 @@ def test_format_secret_source_suffix_bitwarden_uses_proper_name():
     )
 
 
+def test_format_secret_source_suffix_infisical_uses_proper_name():
+    env_loader._SECRET_SOURCES["ANTHROPIC_API_KEY"] = "infisical"
+    assert (
+        env_loader.format_secret_source_suffix("ANTHROPIC_API_KEY")
+        == " (from Infisical)"
+    )
+
+
 def test_format_secret_source_suffix_generic_label_for_future_sources():
     # Future-proofing: a new secret source (e.g. "vault") should still
     # produce a sensible label without needing to edit every call site.
@@ -323,6 +331,86 @@ def test_cold_profile_hydration_dotenv_wins_over_op_env(tmp_path, monkeypatch):
     env_loader.hydrate_profile_secret_sources(tmp_path)
 
     assert seen_env.get("OP_SERVICE_ACCOUNT_TOKEN") == "ops_from-dotenv"
+def test_apply_external_secret_sources_records_infisical_origin(tmp_path, monkeypatch):
+    """End-to-end: applied Infisical keys are labeled with their origin."""
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "secrets:\n"
+        "  infisical:\n"
+        "    enabled: true\n"
+        "    project_id: test-project\n"
+        "    environment: prod\n",
+        encoding="utf-8",
+    )
+
+    from agent.secret_sources.infisical import FetchResult
+
+    fake_result = FetchResult(
+        secrets={"OPENAI_API_KEY": "sk-test"},
+        applied=["OPENAI_API_KEY"],
+    )
+
+    import agent.secret_sources.infisical as inf_module
+
+    monkeypatch.setattr(
+        inf_module, "apply_infisical_secrets", lambda **_kw: fake_result
+    )
+
+    env_loader._apply_external_secret_sources(tmp_path)
+
+    assert env_loader.get_secret_source("OPENAI_API_KEY") == "infisical"
+    assert (
+        env_loader.format_secret_source_suffix("OPENAI_API_KEY")
+        == " (from Infisical)"
+    )
+
+
+def test_apply_external_secret_sources_both_backends_enabled(tmp_path, monkeypatch):
+    """Bitwarden and Infisical can be enabled together; each applied key
+    is attributed to the backend that set it, with Infisical applied
+    second (config order)."""
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "secrets:\n"
+        "  bitwarden:\n"
+        "    enabled: true\n"
+        "    project_id: bw-project\n"
+        "  infisical:\n"
+        "    enabled: true\n"
+        "    project_id: inf-project\n"
+        "    environment: prod\n",
+        encoding="utf-8",
+    )
+
+    from agent.secret_sources.bitwarden import FetchResult as BwResult
+    from agent.secret_sources.infisical import FetchResult as InfResult
+
+    import agent.secret_sources.bitwarden as bw_module
+    import agent.secret_sources.infisical as inf_module
+
+    order = []
+
+    def _fake_bw(**_kw):
+        order.append("bitwarden")
+        return BwResult(secrets={"BW_KEY": "1"}, applied=["BW_KEY"])
+
+    def _fake_inf(**_kw):
+        order.append("infisical")
+        return InfResult(secrets={"INF_KEY": "2"}, applied=["INF_KEY"])
+
+    monkeypatch.setattr(bw_module, "apply_bitwarden_secrets", _fake_bw)
+    monkeypatch.setattr(inf_module, "apply_infisical_secrets", _fake_inf)
+
+    env_loader._apply_external_secret_sources(tmp_path)
+
+    assert order == ["bitwarden", "infisical"]
+    assert env_loader.get_secret_source("BW_KEY") == "bitwarden"
+    assert env_loader.get_secret_source("INF_KEY") == "infisical"
+
 
 
 def test_apply_external_secret_sources_noop_when_disabled(tmp_path, monkeypatch):
