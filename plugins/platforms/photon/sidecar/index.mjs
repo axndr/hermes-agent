@@ -211,6 +211,38 @@ if (!projectId || !projectSecret || !sharedToken) {
   process.exit(2);
 }
 
+// spectrum-ts 3.1.0 fetches GET /projects/:id during Spectrum() startup.
+// Photon's current cloud endpoint can hang on that read while the iMessage
+// token endpoints continue to work, which prevents the loopback health server
+// from ever starting. The iMessage provider only reads projectConfig.profile
+// for optional contact sharing, so provide the minimal shape locally and let
+// all auth/token/message calls continue to hit Photon normally.
+const nativeFetch = globalThis.fetch.bind(globalThis);
+globalThis.fetch = async (url, init = {}) => {
+  const method = String(init?.method || "GET").toUpperCase();
+  const href = typeof url === "string" ? url : url?.url;
+  if (method === "GET" && href) {
+    try {
+      const parsed = new URL(href);
+      if (
+        parsed.origin === "https://spectrum.photon.codes" &&
+        parsed.pathname === `/projects/${projectId}/`
+      ) {
+        console.error(
+          "photon-sidecar: bypassing hanging Spectrum project metadata read"
+        );
+        return new Response(
+          JSON.stringify({ succeed: true, data: { id: projectId, profile: {} } }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    } catch {
+      // Fall through to native fetch for non-URL inputs.
+    }
+  }
+  return nativeFetch(url, init);
+};
+
 // Lazy-load spectrum-ts so a missing install fails with a clear message
 // instead of a cryptic module-resolution error during import. Apply Hermes'
 // pinned-sdk compatibility patch first so existing installs self-heal at

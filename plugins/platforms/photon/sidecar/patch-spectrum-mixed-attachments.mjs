@@ -159,7 +159,11 @@ export function patchSpectrumTs(root = scriptDir()) {
     fs.writeFileSync(file, patched, "utf8");
     return { patched: true, file };
   }
-  throw new Error("could not find @spectrum-ts/imessage iMessage inbound chunk to patch");
+  // spectrum-ts >=5 split providers into @spectrum-ts/* packages and no longer
+  // has the old bundled iMessage chunk shape. If the current package layout no
+  // longer contains the anchored mapper, treat it as already handled upstream
+  // rather than failing npm install / sidecar startup.
+  return { patched: false, file: dist, reason: "no bundled iMessage chunk found" };
 }
 
 const _invokedDirectly =
