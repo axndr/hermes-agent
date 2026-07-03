@@ -60,10 +60,8 @@ def main():
     args = parser.parse_args()
 
     # llama_cpp (backbone) offloads to GPU only for the literal string "gpu";
-    # torch (codec) only accepts "cuda". A single --device value can't satisfy
-    # both — "cuda" silently no-ops on the backbone, leaving it on CPU.
+    # translate the public CUDA spelling while keeping other device names intact.
     backbone_device = "gpu" if args.device == "cuda" else args.device
-    codec_device = args.device
 
     # Validate inputs
     ref_audio = Path(args.ref_audio).expanduser()
@@ -84,13 +82,27 @@ def main():
         print("Error: neutts not installed. Run: python -m pip install -U neutts[all]", file=sys.stderr)
         sys.exit(1)
 
+    # Use the ONNX NeuCodec decoder for local synthesis. It avoids loading the
+    # full PyTorch codec model and keeps NeuTTS Nano viable inside the gateway
+    # service's memory budget.
     tts = NeuTTS(
         backbone_repo=args.model,
         backbone_device=backbone_device,
-        codec_repo="neuphonic/neucodec",
-        codec_device=codec_device,
+        codec_repo="neuphonic/neucodec-onnx-decoder",
+        codec_device="cpu",
     )
-    ref_codes = tts.encode_reference(str(ref_audio))
+    # If a pre-encoded reference exists beside the WAV (e.g. jo.pt), use it.
+    # This lets the lightweight ONNX decoder path avoid loading the full
+    # PyTorch codec just to encode a static reference sample.
+    ref_codes_path = ref_audio.with_suffix(".pt")
+    if ref_codes_path.exists():
+        import torch
+        try:
+            ref_codes = torch.load(str(ref_codes_path), map_location="cpu", weights_only=True)
+        except TypeError:
+            ref_codes = torch.load(str(ref_codes_path), map_location="cpu")
+    else:
+        ref_codes = tts.encode_reference(str(ref_audio))
     wav = tts.infer(args.text, ref_codes, ref_text)
 
     # Write output
