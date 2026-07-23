@@ -271,6 +271,18 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "copilot-acp": [
         "copilot-acp",
     ],
+    "claude-acp": [
+        "claude-fable-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-opus-4-5-20251101",
+        "claude-sonnet-4-5-20250929",
+        "claude-opus-4-20250514",
+        "claude-sonnet-4-20250514",
+        "claude-haiku-4-5-20251001",
+    ],
     "copilot": [
         "gpt-5.4",
         "gpt-5.4-mini",
@@ -1071,6 +1083,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("lmstudio",       "LM Studio",                "LM Studio (Local desktop app with built-in model server)"),
     ProviderEntry("anthropic",      "Anthropic",                "Anthropic (Claude models via API key or Claude Code)"),
     ProviderEntry("openai-codex",   "OpenAI Codex",             "OpenAI Codex (Codex CLI via ChatGPT subscription or API key)"),
+    ProviderEntry("claude-acp",     "Claude Code · ACP",        "Claude Code over ACP (spawns HERMES_CLAUDE_ACP_COMMAND, e.g. claude-agent-acp on a Claude subscription)"),
     ProviderEntry("openai-api",     "OpenAI API",               "OpenAI API (api.openai.com, API key)"),
     ProviderEntry("alibaba",        "Qwen Cloud",               "Qwen Cloud / DashScope (Qwen + multi-provider)"),
     ProviderEntry("xai-oauth",      "xAI Grok OAuth (SuperGrok / Premium+)", "xAI Grok OAuth (SuperGrok / Premium+ subscription)"),
@@ -1241,6 +1254,9 @@ _PROVIDER_ALIASES = {
     "github-model": "copilot",
     "github-copilot-acp": "copilot-acp",
     "copilot-acp-agent": "copilot-acp",
+    "claude-code-acp": "claude-acp",
+    "claudeacp": "claude-acp",
+    "claude-acp-agent": "claude-acp",
     "google": "gemini",
     "google-gemini": "gemini",
     "google-ai-studio": "gemini",
@@ -2419,6 +2435,91 @@ def resolve_fast_mode_overrides(model_id: Optional[str]) -> dict[str, Any] | Non
     return {"service_tier": "priority"}
 
 
+_CLAUDE_ACP_MODELS_CACHE: tuple[float, list[str]] | None = None
+
+
+def _resolve_claude_acp_pool_token() -> str:
+    """First available claude-acp credential-pool token, read-only.
+
+    Mirrors ``anthropic_adapter._resolve_anthropic_pool_token``: enumerates
+    with ``clear_expired=False, refresh=False`` so a bare model-list resolve
+    never mutates ``~/.hermes/auth.json`` or triggers a network refresh.
+    """
+    try:
+        from agent.credential_pool import load_pool
+    except Exception:
+        return ""
+    try:
+        pool = load_pool("claude-acp")
+        entries = pool._available_entries(clear_expired=False, refresh=False)
+    except Exception:
+        return ""
+    for entry in entries:
+        token = (getattr(entry, "access_token", None) or "").strip()
+        if token:
+            return token
+    return ""
+
+
+def _resolve_claude_acp_token() -> str:
+    """Bearer token for claude-agent-acp: pool -> env -> token file.
+
+    Env/file reads go through ``secret_scope.get_secret`` so multiplexed
+    gateways never leak one profile's token to another (fail-closed when
+    multiplexing is active and no scope is installed).
+    """
+    token = _resolve_claude_acp_pool_token()
+    if token:
+        return token
+    try:
+        from agent.secret_scope import get_secret
+    except Exception:
+        get_secret = lambda name, default=None: os.getenv(name, default)  # noqa: E731
+
+    token = (get_secret("CLAUDE_CODE_OAUTH_TOKEN", "") or "").strip()
+    if token:
+        return token
+    tok_file = (get_secret("CLAUDE_ACP_TOKEN_FILE", "") or "").strip() or os.path.expanduser(
+        "~/.config/claude-acp/token"
+    )
+    try:
+        return Path(tok_file).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _fetch_claude_acp_models() -> list[str]:
+    """Live Anthropic model ids for the claude-acp provider.
+
+    Token resolver: credential pool -> CLAUDE_CODE_OAUTH_TOKEN ->
+    CLAUDE_ACP_TOKEN_FILE. Results are cached for 300s.
+    """
+    global _CLAUDE_ACP_MODELS_CACHE
+    token = _resolve_claude_acp_token()
+    if not token:
+        return []
+    now = time.time()
+    if _CLAUDE_ACP_MODELS_CACHE and now - _CLAUDE_ACP_MODELS_CACHE[0] < 300:
+        return list(_CLAUDE_ACP_MODELS_CACHE[1])
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/models?limit=100",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "oauth-2025-04-20",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return []
+    ids = [m.get("id") for m in payload.get("data", []) if isinstance(m, dict) and m.get("id")]
+    if ids:
+        _CLAUDE_ACP_MODELS_CACHE = (now, ids)
+    return ids
+
+
 def _resolve_copilot_catalog_api_key() -> str:
     """Best-effort GitHub token for fetching the Copilot model catalog.
 
@@ -2577,6 +2678,11 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         return get_codex_model_ids(access_token=access_token)
     if normalized == "xai-oauth":
         return list(_PROVIDER_MODELS.get("xai-oauth", _PROVIDER_MODELS.get("xai", [])))
+    if normalized == "claude-acp":
+        claude_live = _fetch_claude_acp_models()
+        if claude_live:
+            return claude_live
+        return list(_PROVIDER_MODELS.get("claude-acp", []))
     if normalized in {"copilot", "copilot-acp"}:
         try:
             live = _fetch_github_models(_resolve_copilot_catalog_api_key())

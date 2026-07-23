@@ -105,7 +105,9 @@ class CopilotACPClientSafetyTests(unittest.TestCase):
     def test_timeout_object_is_coerced_for_streaming_requests(self) -> None:
         captured: dict[str, float] = {}
 
-        def fake_run_prompt(prompt_text: str, *, timeout_seconds: float) -> tuple[str, str]:
+        def fake_run_prompt(
+            prompt_text: str, *, timeout_seconds: float, model: str | None = None
+        ) -> tuple[str, str]:
             captured["timeout"] = timeout_seconds
             return "ok", ""
 
@@ -292,12 +294,13 @@ def test_run_prompt_preserves_real_home_when_profile_home_available(monkeypatch,
 
     monkeypatch.setenv("HOME", str(real_home))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("HERMES_REAL_HOME", raising=False)
 
     captured = {}
     client = _make_home_client(tmp_path)
 
     with _patch("agent.copilot_acp_client.subprocess.Popen", side_effect=_fake_popen_capture(captured)):
-        with pytest.raises(RuntimeError, match="Could not start Copilot ACP command"):
+        with pytest.raises(RuntimeError, match="Could not start copilot-acp command"):
             client._run_prompt("hello", timeout_seconds=1)
 
     assert captured["kwargs"]["env"]["HOME"] == str(real_home)
@@ -312,8 +315,177 @@ def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
     client = _make_home_client(tmp_path)
 
     with _patch("agent.copilot_acp_client.subprocess.Popen", side_effect=_fake_popen_capture(captured)):
-        with pytest.raises(RuntimeError, match="Could not start Copilot ACP command"):
+        with pytest.raises(RuntimeError, match="Could not start copilot-acp command"):
             client._run_prompt("hello", timeout_seconds=1)
 
     assert "env" in captured["kwargs"]
     assert captured["kwargs"]["env"]["HOME"]
+
+
+# ---------------------------------------------------------------------------
+# Provider-aware command resolution (hermes-claude-acp Phase 1 identity split)
+#
+# Live-deployment regression: a claude-acp agent whose construction path did
+# not seed explicit command kwargs fell through to the module-level Copilot
+# env-trio fallback and spawned `copilot`, failing with a GitHub-Copilot
+# install hint. Every construction path must resolve claude-acp's command
+# from ITS registry entry (HERMES_CLAUDE_ACP_COMMAND -> claude-agent-acp),
+# and error messages must name the right provider.
+# ---------------------------------------------------------------------------
+
+
+def _clear_acp_env(monkeypatch):
+    for var in (
+        "HERMES_COPILOT_ACP_COMMAND",
+        "COPILOT_CLI_PATH",
+        "HERMES_COPILOT_ACP_ARGS",
+        "HERMES_CLAUDE_ACP_COMMAND",
+        "HERMES_CLAUDE_ACP_ARGS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def _assert_claude_spawn_argv0(client, expected_argv0, expected_provider_in_error):
+    """Drive a real ClaudeACPSession spawn attempt (Phase 2 persistent
+    client) and assert argv[0] + error text."""
+    captured = {}
+    with _patch(
+        "agent.claude_acp_client.subprocess.Popen",
+        side_effect=_fake_popen_capture(captured),
+    ):
+        with pytest.raises(RuntimeError, match=expected_provider_in_error):
+            client._get_or_create_session().ensure_started()
+    assert captured["cmd"][0] == expected_argv0
+
+
+def _assert_spawn_argv0(client, expected_argv0, expected_provider_in_error):
+    """Drive a real _run_prompt spawn attempt and assert argv[0] + error text."""
+    captured = {}
+    with _patch(
+        "agent.copilot_acp_client.subprocess.Popen",
+        side_effect=_fake_popen_capture(captured),
+    ):
+        with pytest.raises(RuntimeError, match=expected_provider_in_error):
+            client._run_prompt("hello", timeout_seconds=1)
+    assert captured["cmd"][0] == expected_argv0
+
+
+def test_claude_acp_client_spawns_claude_command_without_explicit_kwargs(monkeypatch, tmp_path):
+    """The deployed-bug repro: base_url acp://claude, no command kwargs,
+    HERMES_CLAUDE_ACP_COMMAND set — argv[0] must be the claude command,
+    never `copilot`, and the failure hint must name claude-acp."""
+    _clear_acp_env(monkeypatch)
+    monkeypatch.setenv("HERMES_CLAUDE_ACP_COMMAND", "/bin/true")
+
+    client = CopilotACPClient(base_url="acp://claude", acp_cwd=str(tmp_path))
+    assert client._provider == "claude-acp"
+    assert client._acp_command == "/bin/true"
+    assert client._acp_args == []
+    _assert_spawn_argv0(client, "/bin/true", "Could not start claude-acp command")
+
+
+def test_claude_acp_client_agent_init_shape_kwargs(monkeypatch, tmp_path):
+    """agent_init passes command=None/args=[] when the agent had no explicit
+    acp_command — the client must still resolve claude-acp's registry command."""
+    _clear_acp_env(monkeypatch)
+    monkeypatch.setenv("HERMES_CLAUDE_ACP_COMMAND", "/bin/true")
+
+    client = CopilotACPClient(
+        api_key="claude-acp",
+        base_url="acp://claude",
+        command=None,
+        args=[],
+        acp_cwd=str(tmp_path),
+    )
+    assert client._acp_command == "/bin/true"
+    _assert_spawn_argv0(client, "/bin/true", "Could not start claude-acp command")
+
+
+def test_claude_acp_client_defaults_to_claude_agent_acp(monkeypatch, tmp_path):
+    """Without any env override, claude-acp resolves its registry default —
+    claude-agent-acp with no args — not `copilot --acp --stdio`."""
+    _clear_acp_env(monkeypatch)
+
+    client = CopilotACPClient(base_url="acp://claude", acp_cwd=str(tmp_path))
+    assert client._acp_command == "claude-agent-acp"
+    assert client._acp_args == []
+
+
+def test_copilot_acp_client_still_resolves_copilot(monkeypatch, tmp_path):
+    """Mirror: copilot-acp keeps its stock resolution, unaffected by (and not
+    reading) the claude-acp env var."""
+    _clear_acp_env(monkeypatch)
+    monkeypatch.setenv("HERMES_CLAUDE_ACP_COMMAND", "/should/not/leak")
+
+    client = CopilotACPClient(base_url="acp://copilot", acp_cwd=str(tmp_path))
+    assert client._provider == "copilot-acp"
+    assert client._acp_command == "copilot"
+    assert client._acp_args == ["--acp", "--stdio"]
+    _assert_spawn_argv0(client, "copilot", "Could not start copilot-acp command")
+
+
+def test_create_openai_client_path_resolves_claude_command(monkeypatch, tmp_path):
+    """The per-request client recreation path (agent_runtime_helpers.
+    create_openai_client) must produce a Phase-2 ClaudeACPClient (NOT
+    CopilotACPClient — that dispatch was Phase 1's interim wiring, replaced
+    once the persistent client landed) that spawns the claude command —
+    including when the agent has no base_url at all."""
+    from types import SimpleNamespace
+
+    from agent.agent_runtime_helpers import create_openai_client
+    from agent.claude_acp_client import ClaudeACPClient
+
+    _clear_acp_env(monkeypatch)
+    monkeypatch.setenv("HERMES_CLAUDE_ACP_COMMAND", "/bin/true")
+
+    agent = SimpleNamespace(
+        provider="claude-acp",
+        base_url="acp://claude",
+        _client_log_context=lambda: "test",
+    )
+    for kwargs in (
+        {"api_key": "claude-acp", "base_url": "acp://claude"},
+        {"api_key": "claude-acp", "base_url": ""},  # provider-only construction
+    ):
+        client = create_openai_client(agent, dict(kwargs), reason="test", shared=False)
+        assert isinstance(client, ClaudeACPClient)
+        assert client._acp_command == "/bin/true"
+        _assert_claude_spawn_argv0(client, "/bin/true", "Could not start claude-acp command")
+
+
+def test_create_openai_client_path_keeps_copilot_stock(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from agent.agent_runtime_helpers import create_openai_client
+
+    _clear_acp_env(monkeypatch)
+
+    agent = SimpleNamespace(
+        provider="copilot-acp",
+        base_url="acp://copilot",
+        _client_log_context=lambda: "test",
+    )
+    client = create_openai_client(
+        agent, {"api_key": "copilot-acp", "base_url": "acp://copilot"},
+        reason="test", shared=False,
+    )
+    assert isinstance(client, CopilotACPClient)
+    assert client._acp_command == "copilot"
+    assert client._acp_args == ["--acp", "--stdio"]
+
+
+def test_resolve_provider_client_path_resolves_claude_command(monkeypatch, tmp_path):
+    """auxiliary_client.resolve_provider_client('claude-acp') must construct
+    a Phase-2 ClaudeACPClient with the claude command from the registry
+    credentials (superseding Phase 1's interim CopilotACPClient dispatch)."""
+    from agent.auxiliary_client import resolve_provider_client
+    from agent.claude_acp_client import ClaudeACPClient
+
+    _clear_acp_env(monkeypatch)
+    monkeypatch.setenv("HERMES_CLAUDE_ACP_COMMAND", "/bin/true")
+    monkeypatch.setattr("hermes_cli.auth.shutil.which", lambda command: command)
+
+    client, model = resolve_provider_client(provider="claude-acp", model="claude-sonnet-5")
+    assert isinstance(client, ClaudeACPClient)
+    assert client._acp_command == "/bin/true"
+    _assert_claude_spawn_argv0(client, "/bin/true", "Could not start claude-acp command")

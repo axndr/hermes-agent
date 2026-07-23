@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from hermes_cli.models import (
+    _PROVIDER_MODELS,
     azure_foundry_model_api_mode,
     copilot_model_api_mode,
     fetch_github_model_catalog,
@@ -171,6 +172,7 @@ class TestProviderLabel:
         assert provider_label("stepfun") == "StepFun Step Plan"
         assert provider_label("copilot") == "GitHub Copilot"
         assert provider_label("copilot-acp") == "GitHub Copilot ACP"
+        assert provider_label("claude-acp") == "Claude Code · ACP"
         assert provider_label("auto") == "Auto"
 
     def test_unknown_provider_preserves_original_name(self):
@@ -214,6 +216,23 @@ class TestProviderModelIds:
         with patch("hermes_cli.auth.resolve_api_key_provider_credentials", return_value={"api_key": "gh-token"}), \
              patch("hermes_cli.models._fetch_github_models", return_value=["gpt-5.4", "claude-sonnet-4.6"]):
             assert provider_model_ids("copilot-acp") == ["gpt-5.4", "claude-sonnet-4.6"]
+
+    def test_copilot_acp_never_calls_claude_fetch(self):
+        """Identity split: copilot-acp must stay stock — no claude-acp live fetch."""
+        with patch("hermes_cli.models._fetch_claude_acp_models") as mock_claude_fetch, \
+             patch("hermes_cli.auth.resolve_api_key_provider_credentials", return_value={"api_key": "gh-token"}), \
+             patch("hermes_cli.models._fetch_github_models", return_value=["gpt-5.4"]):
+            provider_model_ids("copilot-acp")
+        mock_claude_fetch.assert_not_called()
+
+    def test_claude_acp_prefers_live_catalog(self):
+        with patch("hermes_cli.models._fetch_claude_acp_models", return_value=["claude-sonnet-5", "claude-opus-4-8"]):
+            assert provider_model_ids("claude-acp") == ["claude-sonnet-5", "claude-opus-4-8"]
+
+    def test_claude_acp_falls_back_to_curated_list(self):
+        with patch("hermes_cli.models._fetch_claude_acp_models", return_value=[]):
+            ids = provider_model_ids("claude-acp")
+        assert ids == _PROVIDER_MODELS["claude-acp"]
 
     def test_anthropic_provider_uses_configured_base_url_for_live_catalog(self):
         class _Resp:

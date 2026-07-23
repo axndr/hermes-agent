@@ -31,6 +31,20 @@ def test_copilot_uses_hermes_slug():
     assert gh_copilot is None, "github-copilot slug should not appear (resolved to copilot)"
 
 
+def test_claude_acp_configured_by_spawn_command(monkeypatch):
+    """claude-acp is an external_process provider: it should appear when its
+    spawn command resolves, and must be a distinct identity from copilot-acp
+    (hermes-claude-acp Phase 1 identity split)."""
+    monkeypatch.setattr("hermes_cli.auth.shutil.which", lambda command: f"/usr/local/bin/{command}")
+    monkeypatch.delenv("HERMES_CLAUDE_ACP_COMMAND", raising=False)
+
+    providers = list_authenticated_providers(current_provider="claude-acp")
+
+    claude_acp = next((p for p in providers if p["slug"] == "claude-acp"), None)
+    assert claude_acp is not None, "claude-acp should appear when its spawn command resolves"
+    assert claude_acp["is_current"] is True
+
+
 @patch.dict(os.environ, {"COPILOT_GITHUB_TOKEN": "fake-ghu"}, clear=False)
 def test_copilot_no_duplicate_entries():
     """Copilot must appear only once — not as both 'copilot' (section 1) and 'github-copilot' (section 2)."""

@@ -143,6 +143,7 @@ PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "openrouter": "openrouter",
     "novita": "novita-ai",
     "anthropic": "anthropic",
+    "claude-acp": "anthropic",
     "openai": "openai",
     "openai-codex": "openai",
     "zai": "zai",

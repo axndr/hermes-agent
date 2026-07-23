@@ -96,6 +96,7 @@ MINIMAX_OAUTH_REFRESH_SKEW_SECONDS = 60
 DEFAULT_QWEN_BASE_URL = "https://portal.qwen.ai/v1"
 DEFAULT_GITHUB_MODELS_BASE_URL = "https://api.githubcopilot.com"
 DEFAULT_COPILOT_ACP_BASE_URL = "acp://copilot"
+DEFAULT_CLAUDE_ACP_BASE_URL = "acp://claude"
 DEFAULT_OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
 STEPFUN_STEP_PLAN_INTL_BASE_URL = "https://api.stepfun.ai/step_plan/v1"
 STEPFUN_STEP_PLAN_CN_BASE_URL = "https://api.stepfun.com/step_plan/v1"
@@ -171,6 +172,13 @@ class ProviderConfig:
     api_key_env_vars: tuple = ()
     # Optional env var for base URL override
     base_url_env_var: str = ""
+    # For external_process providers: env vars to check for the spawn command
+    # (in priority order), and the fallback command/args when unset.
+    command_env_vars: tuple = ()
+    default_command: str = ""
+    default_args: tuple = ()
+    # Optional env var carrying a shlex-split override for the spawn args.
+    args_env_var: str = ""
 
 
 PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
@@ -231,6 +239,21 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         auth_type="external_process",
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
+        command_env_vars=("HERMES_COPILOT_ACP_COMMAND", "COPILOT_CLI_PATH"),
+        default_command="copilot",
+        default_args=("--acp", "--stdio"),
+        args_env_var="HERMES_COPILOT_ACP_ARGS",
+    ),
+    "claude-acp": ProviderConfig(
+        id="claude-acp",
+        name="Claude Code · ACP",
+        auth_type="external_process",
+        inference_base_url=DEFAULT_CLAUDE_ACP_BASE_URL,
+        base_url_env_var="CLAUDE_ACP_BASE_URL",
+        command_env_vars=("HERMES_CLAUDE_ACP_COMMAND",),
+        default_command="claude-agent-acp",
+        default_args=(),
+        args_env_var="HERMES_CLAUDE_ACP_ARGS",
     ),
     "gemini": ProviderConfig(
         id="gemini",
@@ -1772,6 +1795,7 @@ def resolve_provider(
         "github": "copilot", "github-copilot": "copilot",
         "github-models": "copilot", "github-model": "copilot",
         "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",
+        "claude-code-acp": "claude-acp", "claude-acp-agent": "claude-acp", "claudeacp": "claude-acp",
         "opencode": "opencode-zen", "zen": "opencode-zen",
         "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth",
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
@@ -6590,20 +6614,55 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
     }
 
 
+def _get_scoped_env(name: str) -> str:
+    """Read an env var through ``secret_scope`` (multiplex-safe) when possible.
+
+    External-process command/args/base-url overrides are per-profile
+    settings, same as any other credential — reading raw ``os.environ`` here
+    would leak one multiplexed profile's spawn command into another's. Falls
+    back to plain ``os.getenv`` only if secret_scope is unimportable (keeps
+    this module importable in contexts that don't wire it up); under an
+    inactive multiplex ``get_secret`` itself reads ``os.environ`` (identical
+    to legacy ``os.getenv``). The read is deliberately OUTSIDE the import's
+    try/except so ``UnscopedSecretError`` (raised when multiplexing is
+    active but no scope is installed) propagates instead of being swallowed
+    into a cross-profile ``os.getenv`` fallback — secret_scope's fail-closed
+    contract must not be defeated here.
+    """
+    try:
+        from agent.secret_scope import get_secret
+    except ImportError:
+        return os.getenv(name, "").strip()
+    return (get_secret(name, "") or "").strip()
+
+
+def _resolve_external_process_command(pconfig: "ProviderConfig") -> tuple:
+    """Resolve (command, args) for an external_process provider from its
+    registered env vars, falling back to the registry defaults."""
+    command = ""
+    for env_var in pconfig.command_env_vars:
+        command = _get_scoped_env(env_var)
+        if command:
+            break
+    if not command:
+        command = pconfig.default_command
+
+    raw_args = _get_scoped_env(pconfig.args_env_var) if pconfig.args_env_var else ""
+    if raw_args:
+        args = shlex.split(raw_args)
+    else:
+        args = list(pconfig.default_args)
+    return command, args
+
+
 def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
     """Status snapshot for providers that run a local subprocess."""
     pconfig = PROVIDER_REGISTRY.get(provider_id)
     if not pconfig or pconfig.auth_type != "external_process":
         return {"configured": False}
 
-    command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
-        or "copilot"
-    )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
-    base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
+    command, args = _resolve_external_process_command(pconfig)
+    base_url = _get_scoped_env(pconfig.base_url_env_var) if pconfig.base_url_env_var else ""
     if not base_url:
         base_url = pconfig.inference_base_url
 
@@ -6637,12 +6696,12 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
         return get_qwen_auth_status()
     if target == "minimax-oauth":
         return get_minimax_oauth_auth_status()
-    if target == "copilot-acp":
-        return get_external_process_provider_status(target)
     if target == "azure-foundry":
         return _get_azure_foundry_auth_status()
     # API-key providers
     pconfig = PROVIDER_REGISTRY.get(target)
+    if pconfig and pconfig.auth_type == "external_process":
+        return get_external_process_provider_status(target)
     if pconfig and pconfig.auth_type == "api_key":
         return get_api_key_provider_status(target)
     # AWS SDK providers (Bedrock) — check via boto3 credential chain
@@ -6816,29 +6875,24 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
             code="invalid_provider",
         )
 
-    base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
+    base_url = _get_scoped_env(pconfig.base_url_env_var) if pconfig.base_url_env_var else ""
     if not base_url:
         base_url = pconfig.inference_base_url
 
-    command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
-        or "copilot"
-    )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    command, args = _resolve_external_process_command(pconfig)
     resolved_command = shutil.which(command) if command else None
     if not resolved_command and not base_url.startswith("acp+tcp://"):
+        env_hint = "/".join(pconfig.command_env_vars) or "the provider's command env var"
         raise AuthError(
-            f"Could not find the Copilot CLI command '{command}'. "
-            "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH.",
+            f"Could not find the '{provider_id}' command '{command}'. "
+            f"Install it or set {env_hint}.",
             provider=provider_id,
-            code="missing_copilot_cli",
+            code="missing_copilot_cli" if provider_id == "copilot-acp" else "missing_external_process_command",
         )
 
     return {
         "provider": provider_id,
-        "api_key": "copilot-acp",
+        "api_key": provider_id,
         "base_url": base_url.rstrip("/"),
         "command": resolved_command or command,
         "args": args,

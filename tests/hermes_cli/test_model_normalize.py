@@ -52,6 +52,27 @@ class TestAnthropicDotToHyphen:
         assert result == "claude-sonnet-4-6"
 
 
+class TestClaudeAcpDotToHyphen:
+    """claude-acp shares Anthropic's native naming (dots -> hyphens), NOT the
+    Copilot bucket's dash->dot / dot-preserving behavior — hermes-claude-acp
+    Phase 1 identity split (SPEC §2.3)."""
+
+    @pytest.mark.parametrize("model,expected", [
+        ("claude-sonnet-4.6", "claude-sonnet-4-6"),
+        ("claude-opus-4.5", "claude-opus-4-5"),
+    ])
+    def test_claude_acp_converts_dots(self, model, expected):
+        result = normalize_model_for_provider(model, "claude-acp")
+        assert result == expected
+
+    def test_claude_acp_strips_matching_prefix(self):
+        result = normalize_model_for_provider("claude-acp/claude-sonnet-4.6", "claude-acp")
+        assert result == "claude-sonnet-4-6"
+
+    def test_claude_acp_in_dot_to_hyphen_set(self):
+        assert "claude-acp" in _DOT_TO_HYPHEN_PROVIDERS
+
+
 # ── OpenCode Zen regression ────────────────────────────────────────────
 
 class TestOpenCodeZenModelNormalization:

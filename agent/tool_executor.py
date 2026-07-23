@@ -238,6 +238,15 @@ def _emit_cancelled_terminal_post_tool_call(
     return result
 
 
+def _tool_search_runtime(agent) -> dict[str, str]:
+    """Return the runtime identity used by Tool Search policy matching."""
+    return {
+        "provider": str(getattr(agent, "provider", "") or ""),
+        "base_url": str(getattr(agent, "base_url", "") or ""),
+        "model": str(getattr(agent, "model", "") or ""),
+    }
+
+
 def _tool_search_scoped_names(agent) -> frozenset:
     """Return the deferrable tool names the session may invoke via tool_call.
 
@@ -262,10 +271,13 @@ def _tool_search_scoped_names(agent) -> frozenset:
 
     enabled = getattr(agent, "enabled_toolsets", None)
     disabled = getattr(agent, "disabled_toolsets", None)
+    runtime = _tool_search_runtime(agent)
+    runtime_fp = tuple(sorted(runtime.items()))
     cache_key = (
         getattr(_registry, "_generation", 0),
         frozenset(enabled) if enabled is not None else None,
         frozenset(disabled) if disabled is not None else None,
+        runtime_fp,
     )
     cached = getattr(agent, "_tool_search_scope_cache", None)
     if cached is not None and cached[0] == cache_key:
@@ -276,8 +288,15 @@ def _tool_search_scoped_names(agent) -> frozenset:
             disabled_toolsets=disabled,
             quiet_mode=True,
             skip_tool_search_assembly=True,
+            tool_search_runtime=runtime,
         ) or []
-        names = _ts.scoped_deferrable_names(scoped_defs)
+        cfg = _ts.load_config()
+        defer_core, keep_visible = cfg.resolve_core_deferral(runtime)
+        names = _ts.scoped_deferrable_names(
+            scoped_defs,
+            defer_core=defer_core,
+            keep_visible=keep_visible,
+        )
     except Exception:
         names = frozenset()
     try:
@@ -428,18 +447,16 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         try:
             from tools import tool_search as _ts
             if function_name == _ts.TOOL_CALL_NAME:
-                _underlying, _underlying_args, _err = _ts.resolve_underlying_call(function_args)
+                _scoped_names = _tool_search_scoped_names(agent)
+                _underlying, _underlying_args, _err = _ts.resolve_underlying_call(
+                    function_args,
+                    allowed_names=_scoped_names,
+                )
                 if not _err and _underlying:
-                    if _underlying in _tool_search_scoped_names(agent):
-                        function_name = _underlying
-                        function_args = _underlying_args
-                    else:
-                        _ts_scope_block = json.dumps({
-                            "error": (
-                                f"'{_underlying}' is not available in this session. "
-                                "Use tool_search to find tools you can call."
-                            ),
-                        }, ensure_ascii=False)
+                    function_name = _underlying
+                    function_args = _underlying_args
+                elif _err:
+                    _ts_scope_block = json.dumps({"error": _err}, ensure_ascii=False)
         except Exception:
             pass
 
@@ -1109,16 +1126,16 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         try:
             from tools import tool_search as _ts
             if function_name == _ts.TOOL_CALL_NAME:
-                _underlying, _underlying_args, _err = _ts.resolve_underlying_call(function_args)
+                _scoped_names = _tool_search_scoped_names(agent)
+                _underlying, _underlying_args, _err = _ts.resolve_underlying_call(
+                    function_args,
+                    allowed_names=_scoped_names,
+                )
                 if not _err and _underlying:
-                    if _underlying in _tool_search_scoped_names(agent):
-                        function_name = _underlying
-                        function_args = _underlying_args
-                    else:
-                        _ts_scope_block = (
-                            f"'{_underlying}' is not available in this session. "
-                            "Use tool_search to find tools you can call."
-                        )
+                    function_name = _underlying
+                    function_args = _underlying_args
+                elif _err:
+                    _ts_scope_block = _err
         except Exception:
             pass
 
@@ -1519,6 +1536,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                     tool_request_middleware_trace=list(middleware_trace),
+                    tool_search_runtime=_tool_search_runtime(agent),
                 )
                 _spinner_result = function_result
             except KeyboardInterrupt:
@@ -1561,6 +1579,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                     tool_request_middleware_trace=list(middleware_trace),
+                    tool_search_runtime=_tool_search_runtime(agent),
                 )
             except KeyboardInterrupt:
                 _emit_cancelled_terminal_post_tool_call(

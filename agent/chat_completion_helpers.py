@@ -967,6 +967,21 @@ def interruptible_api_call(agent, api_kwargs: dict):
             # rather than closing the shared _anthropic_client, which could
             # release a TLS FD mid-SSL-BIO and corrupt an unrelated SQLite DB.
             try:
+                if agent.provider == "claude-acp":
+                    # ClaudeACPClient.close() deliberately does NOT kill the
+                    # persistent session process (session teardown is the
+                    # agent lifecycle's job, not this per-request wrapper's —
+                    # see agent/claude_acp_client.py). The generic
+                    # _close_request_client_once() path below would only
+                    # close the shim object, leaving the in-flight
+                    # `session/prompt` turn running on the subprocess with
+                    # no fast-cancel path — exactly the "interrupts have no
+                    # fast path" gap SPEC.md calls out for the old
+                    # copilot-acp bolt-on. Signal the live ACP session
+                    # directly so it sends `session/cancel` instead.
+                    claude_session = getattr(agent, "_claude_acp_session", None)
+                    if claude_session is not None:
+                        claude_session.request_interrupt()
                 _close_request_client_once("interrupt_abort")
             except Exception:
                 pass
@@ -3587,6 +3602,22 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             "Local provider detected (%s) — stale stream timeout set to %.0fs",
             agent.base_url, _stream_stale_timeout,
         )
+    elif _stream_stale_timeout_base == 180.0 and (
+        agent.provider == "claude-acp"
+        or str(agent.base_url or "").lower().startswith("acp://")
+    ):
+        # Local providers (and the ACP subprocess transport, which has no
+        # httpx sockets to "reconnect" — killing/rebuilding the shim client
+        # changes nothing while the worker blocks on the ACP turn) can
+        # legitimately go long stretches without chunks (prefill on a big
+        # replayed history, silent thinking, native MCP tool work). The ACP
+        # turn has its own turn_timeout; the stale detector would only spam
+        # "Reconnecting..." while doing nothing.
+        _stream_stale_timeout = float("inf")
+        logger.debug(
+            "ACP provider detected (%s) — stale stream timeout disabled",
+            agent.base_url,
+        )
     else:
         # Scale the stale timeout for large contexts: slow models (like Opus)
         # can legitimately think for minutes before producing the first token
@@ -3719,6 +3750,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 "(not a network error)."
             )
             try:
+                if agent.provider == "claude-acp":
+                    # Signal the live ACP session directly so session/cancel
+                    # is sent immediately during a no-chunk window.
+                    claude_session = getattr(agent, "_claude_acp_session", None)
+                    if claude_session is not None:
+                        claude_session.request_interrupt()
                 _cancel_current_stream_attempt("stream_interrupt_abort")
                 # #67142: kind-aware — anthropic aborts the request-local
                 # client's socket from this poll thread; the shared

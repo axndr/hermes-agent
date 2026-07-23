@@ -82,9 +82,85 @@ class TestConfigParsing:
         assert cfg.max_search_limit == 50
         assert cfg.search_default_limit <= cfg.max_search_limit
 
+    def test_core_deferral_is_disabled_by_default(self):
+        from tools.tool_search import ToolSearchConfig
+
+        cfg = ToolSearchConfig.from_raw(None)
+        enabled, keep_visible = cfg.resolve_core_deferral({
+            "provider": "custom",
+            "base_url": "https://cliproxy.example/v1",
+            "model": "claude-opus-4-8",
+        })
+
+        assert enabled is False
+        assert keep_visible == frozenset()
+
+    def test_core_deferral_matches_runtime_selectors(self):
+        from tools.tool_search import ToolSearchConfig
+
+        cfg = ToolSearchConfig.from_raw({
+            "core_deferral": {
+                "enabled": True,
+                "providers": ["custom"],
+                "base_urls": ["cliproxy.example"],
+                "models": ["claude-*"],
+                "keep_visible": ["terminal", "read_file"],
+            },
+        })
+
+        enabled, keep_visible = cfg.resolve_core_deferral({
+            "provider": "custom",
+            "base_url": "https://cliproxy.example/v1",
+            "model": "claude-opus-4-8",
+        })
+
+        assert enabled is True
+        assert keep_visible == frozenset({"terminal", "read_file"})
+
+    def test_core_deferral_does_not_match_other_models(self):
+        from tools.tool_search import ToolSearchConfig
+
+        cfg = ToolSearchConfig.from_raw({
+            "core_deferral": {
+                "enabled": True,
+                "base_urls": ["cliproxy.example"],
+                "models": ["claude-*"],
+            },
+        })
+
+        enabled, _ = cfg.resolve_core_deferral({
+            "provider": "custom",
+            "base_url": "https://cliproxy.example/v1",
+            "model": "gpt-5.5",
+        })
+
+        assert enabled is False
+
+    def test_core_deferral_accepts_json_array_strings_from_config_set(self):
+        from tools.tool_search import ToolSearchConfig
+
+        cfg = ToolSearchConfig.from_raw({
+            "core_deferral": {
+                "enabled": True,
+                "providers": '["custom","cliproxy"]',
+                "base_urls": '["cliproxy.example"]',
+                "models": '["claude-*"]',
+                "keep_visible": '["terminal","read_file"]',
+            },
+        })
+
+        enabled, keep_visible = cfg.resolve_core_deferral({
+            "provider": "custom",
+            "base_url": "https://cliproxy.example/v1",
+            "model": "claude-opus-4-8",
+        })
+
+        assert enabled is True
+        assert keep_visible == frozenset({"terminal", "read_file"})
+
 
 # ---------------------------------------------------------------------------
-# Classification — the hard invariant: core tools NEVER defer.
+# Classification — core tools defer only under an explicit runtime policy.
 # ---------------------------------------------------------------------------
 
 
@@ -126,6 +202,25 @@ class TestClassification:
         names = {(td.get("function") or {}).get("name") for td in visible}
         assert "xx_unknown_tool" in names
         assert deferrable == []
+
+    def test_opt_in_core_deferral_respects_keep_visible(self):
+        from tools.tool_search import classify_tools
+
+        defs = [
+            _td("terminal", "Run shell commands"),
+            _td("read_file", "Read a file"),
+            _td("session_search", "Search past sessions"),
+        ]
+        visible, deferrable = classify_tools(
+            defs,
+            defer_core=True,
+            keep_visible={"terminal"},
+        )
+
+        assert {td["function"]["name"] for td in visible} == {"terminal"}
+        assert {td["function"]["name"] for td in deferrable} == {
+            "read_file", "session_search",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +373,57 @@ class TestAssembly:
         # activation happened; here it didn't).
         assert "tool_search" not in names
 
+    def test_opt_in_core_deferral_replaces_core_tools_with_bridges(self):
+        from tools.tool_search import assemble_tool_defs, ToolSearchConfig, BRIDGE_TOOL_NAMES
+
+        defs = [
+            _td("terminal", "Run shell commands"),
+            _td("read_file", "Read a file"),
+            _td("session_search", "Search past sessions"),
+        ]
+        result = assemble_tool_defs(
+            defs,
+            context_length=200_000,
+            config=ToolSearchConfig.from_raw({"enabled": "auto", "threshold_pct": 100}),
+            defer_core=True,
+            keep_visible={"terminal"},
+        )
+
+        names = {td["function"]["name"] for td in result.tool_defs}
+        assert result.activated is True
+        assert result.deferred_count == 2
+        assert names == {"terminal", *BRIDGE_TOOL_NAMES}
+
+    def test_runtime_policy_is_applied_by_model_tool_assembly(self, monkeypatch):
+        import model_tools
+        from tools import tool_search as ts
+
+        cfg = ts.ToolSearchConfig.from_raw({
+            "enabled": "on",
+            "core_deferral": {
+                "enabled": True,
+                "providers": ["custom"],
+                "base_urls": ["cliproxy.example"],
+                "models": ["claude-*"],
+                "keep_visible": ["terminal"],
+            },
+        })
+        monkeypatch.setattr(ts, "load_config", lambda: cfg)
+        model_tools._clear_tool_defs_cache()
+
+        defs = model_tools.get_tool_definitions(
+            enabled_toolsets=["terminal", "file", "session_search"],
+            quiet_mode=True,
+            tool_search_runtime={
+                "provider": "custom",
+                "base_url": "https://cliproxy.example/v1",
+                "model": "claude-opus-4-8",
+            },
+        )
+        names = {td["function"]["name"] for td in defs}
+
+        assert names == {"terminal", *ts.BRIDGE_TOOL_NAMES}
+
 
 # ---------------------------------------------------------------------------
 # Bridge dispatch
@@ -345,6 +491,31 @@ class TestBridgeDispatch:
         assert err is not None
         assert "bridge tool" in err.lower()
 
+    def test_core_tool_can_be_described_when_policy_defers_it(self):
+        from tools.tool_search import dispatch_tool_describe
+
+        result = dispatch_tool_describe(
+            {"name": "session_search"},
+            current_tool_defs=[_td("session_search", "Search past sessions")],
+            defer_core=True,
+            keep_visible=set(),
+        )
+
+        parsed = json.loads(result)
+        assert parsed["name"] == "session_search"
+
+    def test_resolve_underlying_call_accepts_scoped_deferred_core_tool(self):
+        from tools.tool_search import resolve_underlying_call
+
+        name, args, err = resolve_underlying_call(
+            {"name": "session_search", "arguments": {"query": "cliproxy"}},
+            allowed_names={"session_search"},
+        )
+
+        assert err is None
+        assert name == "session_search"
+        assert args == {"query": "cliproxy"}
+
 
 # ---------------------------------------------------------------------------
 # End-to-end via the real handle_function_call (smoke test).
@@ -364,6 +535,39 @@ class TestHandleFunctionCallIntegration:
         # dispatch path completed without error.
         assert "matches" in parsed or "error" in parsed
 
+    def test_runtime_policy_exposes_deferred_core_tool_to_bridge(self, monkeypatch):
+        import model_tools
+        from tools import tool_search as ts
+
+        cfg = ts.ToolSearchConfig.from_raw({
+            "enabled": "auto",
+            "core_deferral": {
+                "enabled": True,
+                "providers": ["custom"],
+                "base_urls": ["cliproxy.example"],
+                "models": ["claude-*"],
+                "keep_visible": ["terminal"],
+            },
+        })
+        monkeypatch.setattr(ts, "load_config", lambda: cfg)
+        model_tools._clear_tool_defs_cache()
+        runtime = {
+            "provider": "custom",
+            "base_url": "https://cliproxy.example/v1",
+            "model": "claude-opus-4-8",
+        }
+
+        result = model_tools.handle_function_call(
+            function_name="tool_describe",
+            function_args={"name": "session_search"},
+            enabled_toolsets=["session_search"],
+            tool_search_runtime=runtime,
+        )
+
+        parsed = json.loads(result)
+        assert parsed["name"] == "session_search"
+        assert parsed["parameters"]["type"] == "object"
+
 
 class TestRegression_OpenClawCron84141:
     """Regression guard for the OpenClaw cron-tool-loss class of bug.
@@ -372,9 +576,9 @@ class TestRegression_OpenClawCron84141:
     resulted in the agent receiving only ``sessions_send`` — the catalog
     builder silently dropped the requested core tool.
 
-    Our defense: core tools are NEVER deferred. This test exercises the
-    full assembly pipeline with a mixed core+MCP toolset and asserts that
-    every core tool survives.
+    Our default defense: core tools are never deferred unless an explicit,
+    runtime-matched policy opts them in. This test exercises the default
+    assembly path and asserts that every core tool survives.
     """
 
     def test_core_tool_survives_alongside_many_mcp_tools(self):
@@ -533,6 +737,6 @@ class TestRegression_ToolsetScoping:
         )
         names = scoped_deferrable_names(defs)
         assert "mcp_helper_op" in names
-        # core tools are never deferrable
+        # core tools are not deferrable in the default policy
         assert "terminal" not in names
 

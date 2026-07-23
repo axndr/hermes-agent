@@ -31,6 +31,7 @@ from agent.redact import redact_sensitive_text
 from tools.environments.local import hermes_subprocess_env
 
 ACP_MARKER_BASE_URL = "acp://copilot"
+CLAUDE_ACP_MARKER_BASE_URL = "acp://claude"
 _DEFAULT_TIMEOUT_SECONDS = 900.0
 
 _TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
@@ -72,6 +73,64 @@ def _resolve_args() -> list[str]:
     if not raw:
         return ["--acp", "--stdio"]
     return shlex.split(raw)
+
+
+def _provider_for_base_url(base_url: str | None) -> str:
+    """Infer the ACP provider identity from the marker base URL.
+
+    ``acp://claude`` marks the claude-acp provider; anything else (including
+    the legacy ``acp://copilot`` marker and acp+tcp URLs) is copilot-acp.
+    """
+    if str(base_url or "").strip().lower().startswith(CLAUDE_ACP_MARKER_BASE_URL):
+        return "claude-acp"
+    return "copilot-acp"
+
+
+def _registry_command_for_provider(provider: str) -> tuple[str, list[str]]:
+    """Resolve (command, args) for an ACP provider from the auth registry.
+
+    Delegates to the generalized external-process helper so each provider
+    reads only ITS OWN env vars (HERMES_CLAUDE_ACP_COMMAND/_ARGS for
+    claude-acp; HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH/
+    HERMES_COPILOT_ACP_ARGS for copilot-acp) with the registry defaults as
+    fallback. Without this, a claude-acp client constructed with no explicit
+    command would fall back to the module-level Copilot env trio and try to
+    spawn ``copilot`` — the identity-conflation bug Phase 1 removes.
+
+    The legacy module-level env resolution survives only as the
+    copilot-acp fallback for contexts where hermes_cli.auth is unimportable.
+    """
+    try:
+        from hermes_cli.auth import (
+            PROVIDER_REGISTRY,
+            _resolve_external_process_command,
+        )
+        pconfig = PROVIDER_REGISTRY.get(provider)
+        if pconfig is not None:
+            command, args = _resolve_external_process_command(pconfig)
+            return command, list(args)
+    except ImportError:
+        pass
+    if provider == "claude-acp":
+        return (
+            os.getenv("HERMES_CLAUDE_ACP_COMMAND", "").strip() or "claude-agent-acp",
+            shlex.split(os.getenv("HERMES_CLAUDE_ACP_ARGS", "").strip())
+            if os.getenv("HERMES_CLAUDE_ACP_ARGS", "").strip()
+            else [],
+        )
+    return _resolve_command(), _resolve_args()
+
+
+_PROVIDER_SPAWN_HINTS: dict[str, str] = {
+    "claude-acp": (
+        "Install claude-agent-acp (or your wrapper script) or set "
+        "HERMES_CLAUDE_ACP_COMMAND."
+    ),
+    "copilot-acp": (
+        "Install GitHub Copilot CLI or set "
+        "HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
+    ),
+}
 
 
 def _resolve_home_dir() -> str:
@@ -409,11 +468,28 @@ class CopilotACPClient:
         args: list[str] | None = None,
         **_: Any,
     ):
-        self.api_key = api_key or "copilot-acp"
         self.base_url = base_url or ACP_MARKER_BASE_URL
+        # Provider identity comes from the marker base URL, so every
+        # construction path (agent init, per-request client recreation,
+        # auxiliary/fallback resolution) lands on the right spawn command
+        # even when it passes only api_key/base_url.
+        self._provider = _provider_for_base_url(self.base_url)
+        self.api_key = api_key or self._provider
         self._default_headers = dict(default_headers or {})
-        self._acp_command = acp_command or command or _resolve_command()
-        self._acp_args = list(acp_args or args or _resolve_args())
+        # Falsy args ([] / None) mean "unset" — matching the historical
+        # `acp_args or args or _resolve_args()` semantics, where agent_init
+        # passes args=[] when nothing was configured. claude-acp's registry
+        # default is [] anyway, so the ambiguity is copilot-acp-only and
+        # resolves to its stock ["--acp", "--stdio"].
+        explicit_command = acp_command or command
+        explicit_args = acp_args or args
+        if explicit_command and explicit_args:
+            self._acp_command = explicit_command
+            self._acp_args = list(explicit_args)
+        else:
+            registry_command, registry_args = _registry_command_for_provider(self._provider)
+            self._acp_command = explicit_command or registry_command
+            self._acp_args = list(explicit_args or registry_args)
         self._acp_cwd = str(Path(acp_cwd or os.getcwd()).resolve())
         self.chat = _ACPChatNamespace(self)
         self.is_closed = False
@@ -473,6 +549,7 @@ class CopilotACPClient:
         response_text, reasoning_text = self._run_prompt(
             prompt_text,
             timeout_seconds=_effective_timeout,
+            model=model,
         )
 
         tool_calls, cleaned_text = _extract_tool_calls_from_text(response_text)
@@ -501,7 +578,19 @@ class CopilotACPClient:
             return _completion_to_stream_chunks(completion)
         return completion
 
-    def _run_prompt(self, prompt_text: str, *, timeout_seconds: float) -> tuple[str, str]:
+    def _run_prompt(
+        self,
+        prompt_text: str,
+        *,
+        timeout_seconds: float,
+        model: str | None = None,
+    ) -> tuple[str, str]:
+        child_env = _build_subprocess_env()
+        if model:
+            # The prompt-text "model hint" is advisory only; this env var lets
+            # wrapper commands map the per-request model onto their backend's
+            # native selector (e.g. ANTHROPIC_MODEL for claude-agent-acp).
+            child_env["HERMES_ACP_MODEL"] = str(model)
         try:
             proc = subprocess.Popen(
                 [self._acp_command] + self._acp_args,
@@ -511,17 +600,19 @@ class CopilotACPClient:
                 text=True,
                 bufsize=1,
                 cwd=self._acp_cwd,
-                env=_build_subprocess_env(),
+                env=child_env,
             )
         except FileNotFoundError as exc:
+            hint = _PROVIDER_SPAWN_HINTS.get(
+                self._provider, _PROVIDER_SPAWN_HINTS["copilot-acp"]
+            )
             raise RuntimeError(
-                f"Could not start Copilot ACP command '{self._acp_command}'. "
-                "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
+                f"Could not start {self._provider} command '{self._acp_command}'. {hint}"
             ) from exc
 
         if proc.stdin is None or proc.stdout is None:
             proc.kill()
-            raise RuntimeError("Copilot ACP process did not expose stdin/stdout pipes.")
+            raise RuntimeError(f"{self._provider} process did not expose stdin/stdout pipes.")
 
         self.is_closed = False
         with self._active_process_lock:
@@ -588,7 +679,7 @@ class CopilotACPClient:
                 if "error" in msg:
                     err = msg.get("error") or {}
                     raise RuntimeError(
-                        f"Copilot ACP {method} failed: {err.get('message') or err}"
+                        f"{self._provider} ACP {method} failed: {err.get('message') or err}"
                     )
                 return msg.get("result")
 
@@ -609,8 +700,8 @@ class CopilotACPClient:
                         "directly with a Copilot subscription token) via `hermes setup`.\n\n"
                         f"Original error:\n{stderr_text}"
                     )
-                raise RuntimeError(f"Copilot ACP process exited early: {stderr_text}")
-            raise TimeoutError(f"Timed out waiting for Copilot ACP response to {method}.")
+                raise RuntimeError(f"{self._provider} process exited early: {stderr_text}")
+            raise TimeoutError(f"Timed out waiting for {self._provider} response to {method}.")
 
         try:
             _request(
@@ -639,7 +730,7 @@ class CopilotACPClient:
             ) or {}
             session_id = str(session.get("sessionId") or "").strip()
             if not session_id:
-                raise RuntimeError("Copilot ACP did not return a sessionId.")
+                raise RuntimeError(f"{self._provider} did not return a sessionId.")
 
             text_parts: list[str] = []
             reasoning_parts: list[str] = []

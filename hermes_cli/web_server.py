@@ -9733,6 +9733,30 @@ def _copilot_acp_status() -> Dict[str, Any]:
     }
 
 
+def _claude_acp_status() -> Dict[str, Any]:
+    """Status for claude-acp — a spawn-command external_process provider.
+
+    ``logged_in`` reflects whether the spawn command resolves (mirrors
+    ``get_external_process_provider_status``); the bearer token itself is
+    resolved lazily per-request from the credential pool / env / token file
+    (``hermes_cli.models._resolve_claude_acp_token``), so there is no single
+    persisted secret to preview here.
+    """
+    try:
+        from hermes_cli.auth import get_external_process_provider_status
+        raw = get_external_process_provider_status("claude-acp")
+    except Exception as e:
+        return {"logged_in": False, "source": "claude_acp", "error": str(e)}
+    return {
+        "logged_in": bool(raw.get("configured")),
+        "source": "claude_acp",
+        "source_label": raw.get("command") or "claude-agent-acp",
+        "token_preview": None,
+        "expires_at": None,
+        "has_refresh_token": False,
+    }
+
+
 # Explicit, hand-tuned OAuth/account provider cards. These carry the bits that
 # can't be derived from the unified provider catalog: the OAuth ``flow`` shape,
 # the per-provider ``status_fn``, the ``cli_command`` fallback, and curated
@@ -9802,6 +9826,14 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
         "cli_command": "copilot /login",
         "docs_url": "https://docs.github.com/en/copilot",
         "status_fn": _copilot_acp_status,
+    },
+    {
+        "id": "claude-acp",
+        "name": "Claude Code (ACP)",
+        "flow": "external",
+        "cli_command": "hermes auth add claude-acp",
+        "docs_url": "https://docs.claude.com/en/docs/claude-code",
+        "status_fn": _claude_acp_status,
     },
     # ── Anthropic / Claude entries sit at the bottom: the API-key path
     # first, then the subscription OAuth path (which only works with extra

@@ -1048,6 +1048,8 @@ def _build_gateway_agent_history(
 def _select_cached_agent_history(
     persisted_history: List[Dict[str, Any]],
     live_history: Any,
+    *,
+    compression_continuation: bool = False,
 ) -> List[Dict[str, Any]]:
     """Prefer a cached agent's live in-memory transcript over a shorter
     persisted one.
@@ -1059,9 +1061,17 @@ def _select_cached_agent_history(
     transcript with that shorter persisted copy causes immediate same-session
     amnesia. When the live transcript is strictly longer, keep it.
 
-    Returns ``persisted_history`` unchanged unless the live copy is a longer
-    list, in which case a copy of the live transcript is returned.
+    A compression continuation is intentionally shorter than the cached
+    pre-compression transcript. In that case the persisted continuation is
+    canonical and must win; otherwise this corruption guard would undo the
+    compaction and restore the expensive full history on the next gateway turn.
+
+    Returns ``persisted_history`` unchanged for compression continuations or
+    unless the live copy is a longer list. Otherwise a copy of the live
+    transcript is returned.
     """
+    if compression_continuation:
+        return persisted_history
     if isinstance(live_history, list) and len(live_history) > len(persisted_history):
         return list(live_history)
     return persisted_history
@@ -21090,8 +21100,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # immediate same-session amnesia. Only applies when we reused a
             # cached agent bound to this exact session_id.
             if reused_cached_agent and getattr(agent, "session_id", None) == session_id:
+                # A continuation session created by compression is expected to
+                # be shorter than the cached pre-compression transcript. Trust
+                # its canonical persisted history instead of misclassifying
+                # the intentional rewrite as FTS write lag.
+                _compression_continuation = False
+                try:
+                    _session_db = getattr(self, "_session_db", None)
+                    _session_db = getattr(_session_db, "_db", _session_db)
+                    _session_row = _session_db.get_session(session_id) if _session_db else None
+                    _compression_continuation = bool(
+                        _session_row and _session_row.get("parent_session_id")
+                    )
+                except Exception:
+                    logger.debug(
+                        "Could not inspect session lineage before cached-history selection",
+                        exc_info=True,
+                    )
                 _selected = _select_cached_agent_history(
-                    agent_history, getattr(agent, "_session_messages", None)
+                    agent_history,
+                    getattr(agent, "_session_messages", None),
+                    compression_continuation=_compression_continuation,
                 )
                 if _selected is not agent_history:
                     logger.warning(

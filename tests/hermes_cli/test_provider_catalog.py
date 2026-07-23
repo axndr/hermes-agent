@@ -63,6 +63,7 @@ def test_api_key_providers_route_to_keys_oauth_to_accounts():
     assert by["kilocode"].tab == "keys"
     assert by["openai-api"].tab == "keys"
     assert by["copilot-acp"].tab == "accounts"
+    assert by["claude-acp"].tab == "accounts"
 
 
 def test_copilot_surfaces_as_a_provider_with_its_own_token_var():

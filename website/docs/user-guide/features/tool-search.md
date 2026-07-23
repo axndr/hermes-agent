@@ -15,13 +15,12 @@ problem. When activated, MCP and plugin tools are replaced in the
 model-visible tools array by three bridge tools, and the model loads each
 specific tool's schema on demand.
 
-:::info Built-in Hermes tools never defer
+:::info Built-in Hermes tools stay direct by default
 The tools that make up Hermes' core capability set (`terminal`,
 `read_file`, `write_file`, `patch`, `search_files`, `todo`, `memory`,
-`browser_*`, `web_search`, `web_extract`, `clarify`, `execute_code`,
-`delegate_task`, `session_search`, and the rest of
-`_HERMES_CORE_TOOLS`) are *always* loaded directly. Only MCP tools and
-non-core plugin tools are eligible for deferral.
+`browser_*`, and the rest of `_HERMES_CORE_TOOLS`) remain loaded directly
+under the default policy. Core deferral requires an explicit runtime-matched
+`core_deferral` policy and a deliberately chosen `keep_visible` set.
 :::
 
 ## How it works
@@ -58,7 +57,10 @@ see the underlying tool, not the bridge.
 By default Tool Search runs in `auto` mode: it activates only when the
 deferrable tool schemas would consume at least 10% of the active model's
 context window. Below that, the tools-array assembly is a pure
-pass-through and you pay no overhead.
+pass-through and you pay no overhead. A matched `core_deferral` policy is
+the exception: it activates regardless of the percentage threshold because
+its purpose is to cap the number of directly exposed tools. Setting
+`tools.tool_search.enabled: off` still disables all deferral.
 
 This decision is re-evaluated every time the tools array is built, so:
 
@@ -78,6 +80,12 @@ tools:
     threshold_pct: 10   # percentage of context — only used in auto mode
     search_default_limit: 5
     max_search_limit: 20
+    core_deferral:
+      enabled: false
+      providers: []     # glob patterns, e.g. [custom]
+      base_urls: []     # URL/hostname matches
+      models: []        # glob patterns, e.g. [claude-*]
+      keep_visible: []  # core tools that remain directly exposed
 ```
 
 | Key | Default | Meaning |
@@ -86,6 +94,16 @@ tools:
 | `threshold_pct` | `10` | Percentage of context length at which `auto` mode kicks in. Range 0–100. |
 | `search_default_limit` | `5` | Hits returned when the model calls `tool_search` without a `limit`. |
 | `max_search_limit` | `20` | Hard upper bound the model can request via `limit`. Range 1–50. |
+| `core_deferral.enabled` | `false` | Allows core tools to defer only when every non-empty runtime selector list matches. |
+| `core_deferral.providers` | `[]` | Provider glob patterns. |
+| `core_deferral.base_urls` | `[]` | URL substrings or hostnames. |
+| `core_deferral.models` | `[]` | Model glob patterns. |
+| `core_deferral.keep_visible` | `[]` | Core tools that remain directly listed when the policy matches. |
+
+Use all three runtime selectors for narrow provider-specific policies. For
+example, a policy can target only `custom` provider sessions whose base URL
+contains a particular gateway hostname and whose model matches `claude-*`.
+All non-empty selector groups must match.
 
 You can also flip the legacy boolean shape:
 
@@ -103,7 +121,10 @@ win when you have many tools and use few per turn; it's overhead when
 you have few tools total.
 
 The `auto` default handles this for you. If you set `enabled: on`
-unconditionally, expect a slight per-turn cost on small toolsets.
+unconditionally, expect a slight per-turn cost on small toolsets. Core
+deferral is an advanced compatibility control: keep the tools used on most
+turns directly visible, and test the target model's search/describe/call
+behavior before enabling it broadly.
 
 ## Trade-offs that don't go away
 

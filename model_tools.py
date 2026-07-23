@@ -281,6 +281,7 @@ def get_tool_definitions(
     disabled_toolsets: Optional[List[str]] = None,
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
+    tool_search_runtime: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
@@ -296,6 +297,9 @@ def get_tool_definitions(
             tool_search / tool_describe bridge handlers so they can read the
             real catalog, not the already-collapsed one. Public callers should
             leave this False.
+        tool_search_runtime: Optional runtime identity with ``provider``,
+            ``base_url``, and ``model``. Used only to resolve opt-in,
+            provider-scoped core-tool deferral.
 
     Returns:
         Filtered list of OpenAI-format tool definitions.
@@ -316,6 +320,11 @@ def get_tool_definitions(
             cfg_fp = (cfg_stat.st_mtime_ns, cfg_stat.st_size)
         except (FileNotFoundError, OSError, ImportError):
             cfg_fp = None
+        runtime = tool_search_runtime if isinstance(tool_search_runtime, dict) else {}
+        runtime_fp = tuple(
+            (key, str(runtime.get(key) or "").strip().lower())
+            for key in ("provider", "base_url", "model")
+        )
         cache_key = (
             frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
             frozenset(disabled_toolsets) if disabled_toolsets else None,
@@ -323,6 +332,7 @@ def get_tool_definitions(
             cfg_fp,
             bool(os.environ.get("HERMES_KANBAN_TASK")),
             bool(skip_tool_search_assembly),
+            runtime_fp,
         )
         cached = _tool_defs_cache.get(cache_key)
         if cached is not None:
@@ -334,8 +344,13 @@ def get_tool_definitions(
             # schemas are treated as read-only by all known callers.
             return list(cached)
 
-    result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
-                                       skip_tool_search_assembly=skip_tool_search_assembly)
+    result = _compute_tool_definitions(
+        enabled_toolsets,
+        disabled_toolsets,
+        quiet_mode,
+        skip_tool_search_assembly=skip_tool_search_assembly,
+        tool_search_runtime=tool_search_runtime,
+    )
     if quiet_mode:
         # Cache the freshly-computed list, but hand callers a shallow copy so
         # downstream mutations (e.g. run_agent appending memory/LCM tool
@@ -359,6 +374,7 @@ def _compute_tool_definitions(
     disabled_toolsets: Optional[List[str]] = None,
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
+    tool_search_runtime: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     # Determine which tool names the caller wants
@@ -549,14 +565,18 @@ def _compute_tool_definitions(
         ts_cfg = _load_ts_config()
         if not skip_tool_search_assembly and ts_cfg.enabled != "off":
             context_length = _resolve_active_context_length()
+            defer_core, keep_visible = ts_cfg.resolve_core_deferral(tool_search_runtime)
             assembly = assemble_tool_defs(
                 filtered_tools,
                 context_length=context_length,
                 config=ts_cfg,
+                defer_core=defer_core,
+                keep_visible=keep_visible,
             )
             if assembly.activated and not quiet_mode:
+                deferred_kind = "tools" if defer_core else "MCP/plugin tools"
                 print(
-                    f"🔎 Tool Search: {assembly.deferred_count} MCP/plugin tools deferred "
+                    f"🔎 Tool Search: {assembly.deferred_count} {deferred_kind} deferred "
                     f"(~{assembly.deferred_tokens} tokens) behind tool_search/describe/call. "
                     f"Threshold ~{assembly.threshold_tokens} tokens."
                 )
@@ -1067,6 +1087,7 @@ def handle_function_call(
     tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     disabled_toolsets: Optional[List[str]] = None,
+    tool_search_runtime: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -1127,28 +1148,49 @@ def handle_function_call(
             current_defs = get_tool_definitions(
                 enabled_toolsets=enabled_toolsets,
                 disabled_toolsets=disabled_toolsets,
-                quiet_mode=True, skip_tool_search_assembly=True,
+                quiet_mode=True,
+                skip_tool_search_assembly=True,
+                tool_search_runtime=tool_search_runtime,
             ) or []
         except Exception:
             current_defs = []
+        try:
+            _ts_cfg = _ts_mod.load_config()
+            _defer_core, _keep_visible = _ts_cfg.resolve_core_deferral(tool_search_runtime)
+        except Exception:
+            _ts_cfg = None
+            _defer_core, _keep_visible = False, frozenset()
+        _scoped_deferrable = _ts_mod.scoped_deferrable_names(
+            current_defs,
+            defer_core=_defer_core,
+            keep_visible=_keep_visible,
+        )
         if function_name == _ts_mod.TOOL_SEARCH_NAME:
-            return _ts_mod.dispatch_tool_search(function_args or {},
-                                                current_tool_defs=current_defs)
+            return _ts_mod.dispatch_tool_search(
+                function_args or {},
+                current_tool_defs=current_defs,
+                config=_ts_cfg,
+                defer_core=_defer_core,
+                keep_visible=_keep_visible,
+            )
         if function_name == _ts_mod.TOOL_DESCRIBE_NAME:
-            return _ts_mod.dispatch_tool_describe(function_args or {},
-                                                  current_tool_defs=current_defs)
+            return _ts_mod.dispatch_tool_describe(
+                function_args or {},
+                current_tool_defs=current_defs,
+                defer_core=_defer_core,
+                keep_visible=_keep_visible,
+            )
         if function_name == _ts_mod.TOOL_CALL_NAME:
-            underlying_name, underlying_args, err = _ts_mod.resolve_underlying_call(function_args or {})
+            underlying_name, underlying_args, err = _ts_mod.resolve_underlying_call(
+                function_args or {},
+                allowed_names=_scoped_deferrable,
+            )
             if err or not underlying_name:
                 return json.dumps({"error": err or "tool_call could not be resolved"},
                                   ensure_ascii=False)
             # Defense in depth: the underlying tool MUST be in the session's
-            # scoped deferrable catalog. resolve_underlying_call() only checks
-            # that the name is deferrable in the global registry; this gate
-            # additionally rejects any tool the session was not granted, so a
-            # restricted session can never invoke an out-of-scope tool through
-            # the bridge even if the catalog scoping above regressed.
-            _scoped_deferrable = _ts_mod.scoped_deferrable_names(current_defs)
+            # scoped deferred catalog. ``allowed_names`` above enforces the
+            # policy and restricted-toolset boundary before recursion.
             if underlying_name not in _scoped_deferrable:
                 return json.dumps({
                     "error": (
@@ -1171,6 +1213,7 @@ def handle_function_call(
                 tool_request_middleware_trace=list(_tool_middleware_trace),
                 enabled_toolsets=enabled_toolsets,
                 disabled_toolsets=disabled_toolsets,
+                tool_search_runtime=tool_search_runtime,
             )
 
     _tool_original_args = dict(function_args)

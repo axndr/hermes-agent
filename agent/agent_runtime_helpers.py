@@ -1862,12 +1862,38 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     httpx_verify = resolve_httpx_verify(ca_bundle=ssl_ca_cert, ssl_verify=ssl_verify_cfg)
     _validate_proxy_env_urls()
     _validate_base_url(client_kwargs.get("base_url"))
-    if agent.provider == "copilot-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://copilot"):
-        from agent.copilot_acp_client import CopilotACPClient
+    if agent.provider == "claude-acp" or str(
+        client_kwargs.get("base_url", "")
+    ).lower().startswith("acp://claude"):
+        from agent.claude_acp_client import ClaudeACPClient
+        from agent.copilot_acp_client import CLAUDE_ACP_MARKER_BASE_URL
 
+        if not str(client_kwargs.get("base_url") or "").strip():
+            client_kwargs["base_url"] = CLAUDE_ACP_MARKER_BASE_URL
+        # Persistent-session client (Phase 2): pass the agent so the
+        # underlying ClaudeACPSession is cached on agent._claude_acp_session
+        # and survives across the per-request client recreation this
+        # function does for every turn (see docstring on ClaudeACPClient).
+        client_kwargs["agent"] = agent
+        client = ClaudeACPClient(**client_kwargs)
+        _ra().logger.info(
+            "claude-acp client created (%s, shared=%s) %s",
+            reason,
+            shared,
+            agent._client_log_context(),
+        )
+        return client
+    if agent.provider == "copilot-acp" or str(
+        client_kwargs.get("base_url", "")
+    ).lower().startswith("acp://copilot"):
+        from agent.copilot_acp_client import ACP_MARKER_BASE_URL, CopilotACPClient
+
+        if not str(client_kwargs.get("base_url") or "").strip():
+            client_kwargs["base_url"] = ACP_MARKER_BASE_URL
         client = CopilotACPClient(**client_kwargs)
         _ra().logger.info(
-            "Copilot ACP client created (%s, shared=%s) %s",
+            "ACP client created (provider=%s, %s, shared=%s) %s",
+            agent.provider,
             reason,
             shared,
             agent._client_log_context(),
@@ -2536,6 +2562,11 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 tool_request_middleware_trace=list(_tool_middleware_trace),
+                tool_search_runtime={
+                    "provider": str(getattr(agent, "provider", "") or ""),
+                    "base_url": str(getattr(agent, "base_url", "") or ""),
+                    "model": str(getattr(agent, "model", "") or ""),
+                },
             )
 
     from hermes_cli.middleware import run_tool_execution_middleware

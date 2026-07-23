@@ -1925,6 +1925,112 @@ def _model_flow_copilot_acp(config, current_model=""):
 
     print(f"Default model set to: {selected} (via {pconfig.name})")
 
+
+def _model_flow_claude_acp(config, current_model=""):
+    """Claude Code ACP flow: spawn command + pooled bearer token."""
+    import json as _json
+    import urllib.request as _urllib_request
+
+    from hermes_cli.auth import (
+        PROVIDER_REGISTRY,
+        AuthError,
+        _prompt_model_selection,
+        _save_model_choice,
+        deactivate_provider,
+        get_external_process_provider_status,
+        resolve_external_process_provider_credentials,
+    )
+    from hermes_cli.models import _fetch_claude_acp_models, _resolve_claude_acp_token, _PROVIDER_MODELS
+    from hermes_cli.config import load_config, save_config
+
+    del config
+
+    provider_id = "claude-acp"
+    pconfig = PROVIDER_REGISTRY[provider_id]
+
+    status = get_external_process_provider_status(provider_id)
+    resolved_command = (
+        status.get("resolved_command") or status.get("command") or pconfig.default_command
+    )
+    effective_base = status.get("base_url") or pconfig.inference_base_url
+
+    print("  Claude Code ACP delegates Hermes turns to `claude-agent-acp`.")
+    print("  Hermes currently starts its own ACP subprocess for each request.")
+    print(f"  Command: {resolved_command}")
+    print(f"  Backend marker: {effective_base}")
+    print()
+
+    try:
+        creds = resolve_external_process_provider_credentials(provider_id)
+    except AuthError as exc:
+        print(f"  ⚠ {exc}")
+        print("  Set HERMES_CLAUDE_ACP_COMMAND if claude-agent-acp is installed elsewhere.")
+        return
+
+    effective_base = creds.get("base_url") or effective_base
+
+    # Credential pool first (mirrors the Codex flow's pool-first lookup),
+    # falling back to CLAUDE_CODE_OAUTH_TOKEN / CLAUDE_ACP_TOKEN_FILE via
+    # the shared resolver in hermes_cli.models.
+    token = _resolve_claude_acp_token()
+    if token:
+        try:
+            req = _urllib_request.Request(
+                "https://api.anthropic.com/v1/models",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "anthropic-version": "2023-06-01",
+                    "anthropic-beta": "oauth-2025-04-20",
+                },
+            )
+            with _urllib_request.urlopen(req, timeout=10) as resp:
+                _json.loads(resp.read().decode("utf-8"))
+            print("  ✓ Claude subscription token validated.")
+        except Exception as exc:
+            print(f"  ⚠ Could not validate Claude token against api.anthropic.com: {exc}")
+    else:
+        print(
+            "  ⚠ No Claude token found (credential pool / CLAUDE_CODE_OAUTH_TOKEN / "
+            "CLAUDE_ACP_TOKEN_FILE). Model list falls back to the curated defaults; "
+            "run `hermes auth add claude-acp` or `claude setup-token` first."
+        )
+
+    model_list = _fetch_claude_acp_models() or list(_PROVIDER_MODELS.get("claude-acp", []))
+
+    if model_list:
+        selected = _prompt_model_selection(
+            model_list,
+            current_model=current_model,
+            confirm_provider=provider_id,
+            confirm_base_url=effective_base,
+        )
+    else:
+        try:
+            selected = input("Model name: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            selected = None
+
+    if not selected:
+        print("No change.")
+        return
+
+    _save_model_choice(selected)
+
+    cfg = load_config()
+    model = cfg.get("model")
+    if not isinstance(model, dict):
+        model = {"default": model} if model else {}
+        cfg["model"] = model
+    model["provider"] = provider_id
+    model["base_url"] = effective_base
+    model["api_mode"] = "chat_completions"
+    clear_model_endpoint_credentials(model, clear_api_mode=False)
+    save_config(cfg)
+    deactivate_provider()
+
+    print(f"Default model set to: {selected} (via {pconfig.name})")
+
+
 def _model_flow_kimi(config, current_model=""):
     """Kimi / Moonshot model selection with automatic endpoint routing.
 

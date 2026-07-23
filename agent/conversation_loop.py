@@ -1587,6 +1587,11 @@ def run_conversation(
                     or str(agent.base_url or "").lower().startswith("acp://copilot")
                     or str(agent.base_url or "").lower().startswith("acp+tcp://")
                 ):
+                    # copilot-acp's client returns a plain SimpleNamespace,
+                    # never a stream. claude-acp is NOT excluded: its client
+                    # streams live deltas (MCP mode / no-tools turns) and
+                    # returns post-hoc chunks for text-bridge-with-tools
+                    # turns — both iterable, both consumer-shaped.
                     _use_streaming = False
                 # MoA streams only when a display/TTS consumer is present to
                 # receive the deltas. MoAChatCompletions.create() honors

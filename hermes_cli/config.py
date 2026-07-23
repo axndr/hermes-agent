@@ -2900,16 +2900,11 @@ DEFAULT_CONFIG = {
     },
 
     # Tool Search (progressive disclosure for large tool surfaces).
-    # When the model is connected to many MCP servers or non-core plugin
-    # tools, their JSON schemas can consume a substantial fraction of the
-    # context window on every turn. When enabled, those tools are replaced
-    # in the model-facing tools array with three bridge tools —
-    # tool_search / tool_describe / tool_call — and surfaced on demand.
-    #
-    # Core Hermes tools (terminal, read_file, write_file, patch,
-    # search_files, todo, memory, browser_*, etc.) are NEVER deferred.
-    # See tools/tool_search.py for full design notes and the
-    # openclaw-tool-search-report PDF in this PR for the rationale.
+    # Eligible JSON schemas are replaced in the model-facing tools array with
+    # tool_search / tool_describe / tool_call and surfaced on demand.
+    # MCP and non-core plugin tools are eligible by default. Core Hermes tools
+    # remain direct unless an explicit runtime-matched policy opts them in.
+    # See tools/tool_search.py for the full design and safety invariants.
     "tools": {
         "tool_search": {
             # "auto" (default) — activate only when deferrable tool schemas
@@ -2928,6 +2923,19 @@ DEFAULT_CONFIG = {
             "search_default_limit": 5,
             # Hard upper bound the model can request via ``limit``. Range 1..50.
             "max_search_limit": 20,
+            # Opt-in core-tool deferral. Disabled by default. When enabled,
+            # every non-empty selector list must match the active runtime;
+            # model/provider entries support shell globs and base_urls match
+            # the URL or hostname. A match bypasses the normal token threshold
+            # because its purpose is to cap direct tool count. ``enabled: off``
+            # above still disables Tool Search entirely.
+            "core_deferral": {
+                "enabled": False,
+                "providers": [],
+                "base_urls": [],
+                "models": [],
+                "keep_visible": [],
+            },
         },
     },
 

@@ -295,6 +295,9 @@ _PROVIDER_ALIASES = {
     "github-models": "copilot",
     "github-copilot-acp": "copilot-acp",
     "copilot-acp-agent": "copilot-acp",
+    "claude-code-acp": "claude-acp",
+    "claudeacp": "claude-acp",
+    "claude-acp-agent": "claude-acp",
     "tencent": "tencent-tokenhub",
     "tokenhub": "tencent-tokenhub",
     "tencent-cloud": "tencent-tokenhub",
@@ -1634,6 +1637,12 @@ def _maybe_wrap_anthropic(
     try:
         from agent.copilot_acp_client import CopilotACPClient
         if _safe_isinstance(client_obj, CopilotACPClient):
+            return client_obj
+    except ImportError:
+        pass
+    try:
+        from agent.claude_acp_client import ClaudeACPClient
+        if _safe_isinstance(client_obj, ClaudeACPClient):
             return client_obj
     except ImportError:
         pass
@@ -4606,6 +4615,12 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
             return sync_client, model
     except ImportError:
         pass
+    try:
+        from agent.claude_acp_client import ClaudeACPClient
+        if isinstance(sync_client, ClaudeACPClient):
+            return sync_client, model
+    except ImportError:
+        pass
 
     async_kwargs = {
         "api_key": sync_client.api_key,
@@ -5263,31 +5278,48 @@ def resolve_provider_client(
             or _read_main_model(),
             provider,
         )
-        if provider == "copilot-acp":
+        if provider in {"copilot-acp", "claude-acp"}:
             api_key = str(creds.get("api_key", "")).strip()
             base_url = str(creds.get("base_url", "")).strip()
             command = str(creds.get("command", "")).strip() or None
             args = list(creds.get("args") or [])
             if not final_model:
                 logger.warning(
-                    "resolve_provider_client: copilot-acp requested but no model "
-                    "was provided or configured"
+                    "resolve_provider_client: %s requested but no model "
+                    "was provided or configured", provider
                 )
                 return None, None
             if not api_key or not base_url:
                 logger.warning(
-                    "resolve_provider_client: copilot-acp requested but external "
-                    "process credentials are incomplete"
+                    "resolve_provider_client: %s requested but external "
+                    "process credentials are incomplete", provider
                 )
                 return None, None
-            from agent.copilot_acp_client import CopilotACPClient
+            if provider == "claude-acp":
+                from agent.claude_acp_client import ClaudeACPClient
 
-            client = CopilotACPClient(
-                api_key=api_key,
-                base_url=base_url,
-                command=command,
-                args=args,
-            )
+                # No `agent=` here — this is the auxiliary/side-call router
+                # (MOA, fallback, verification calls), not the primary
+                # conversation client, so there is no AIAgent session to
+                # hang persistence off of. The returned ClaudeACPClient
+                # still reuses ONE process across multiple .create() calls
+                # made on this same instance (private session), it just
+                # doesn't survive past this instance's lifetime.
+                client = ClaudeACPClient(
+                    api_key=api_key,
+                    base_url=base_url,
+                    command=command,
+                    args=args,
+                )
+            else:
+                from agent.copilot_acp_client import CopilotACPClient
+
+                client = CopilotACPClient(
+                    api_key=api_key,
+                    base_url=base_url,
+                    command=command,
+                    args=args,
+                )
             logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
             return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                     else (client, final_model))
@@ -6304,6 +6336,7 @@ def _resolve_task_provider_model(
                 "anthropic",
                 "copilot",
                 "copilot-acp",
+                "claude-acp",
                 "minimax-oauth",
                 "nous",
                 "openai-codex",

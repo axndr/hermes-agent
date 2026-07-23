@@ -655,8 +655,9 @@ def init_agent(
     if (
         api_mode is None
         and agent.api_mode == "chat_completions"
-        and agent.provider != "copilot-acp"
+        and agent.provider not in {"copilot-acp", "claude-acp"}
         and not str(agent.base_url or "").lower().startswith("acp://copilot")
+        and not str(agent.base_url or "").lower().startswith("acp://claude")
         and not str(agent.base_url or "").lower().startswith("acp+tcp://")
         and not agent._is_azure_openai_url()
         and (
@@ -1114,9 +1115,23 @@ def init_agent(
                 client_kwargs = {"api_key": api_key, "base_url": base_url}
             if _provider_timeout is not None:
                 client_kwargs["timeout"] = _provider_timeout
-            if agent.provider == "copilot-acp":
+            if agent.provider in {"copilot-acp", "claude-acp"}:
                 client_kwargs["command"] = agent.acp_command
                 client_kwargs["args"] = agent.acp_args
+                # CopilotACPClient infers its provider identity from the
+                # acp:// marker base URL; when the agent was constructed
+                # with a provider but no base_url, seed the right marker so
+                # a claude-acp agent never resolves copilot-acp's command.
+                if not str(client_kwargs.get("base_url") or "").strip():
+                    from agent.copilot_acp_client import (
+                        ACP_MARKER_BASE_URL,
+                        CLAUDE_ACP_MARKER_BASE_URL,
+                    )
+                    client_kwargs["base_url"] = (
+                        CLAUDE_ACP_MARKER_BASE_URL
+                        if agent.provider == "claude-acp"
+                        else ACP_MARKER_BASE_URL
+                    )
             effective_base = base_url
             if base_url_host_matches(effective_base, "openrouter.ai"):
                 from agent.auxiliary_client import build_or_headers
@@ -1364,6 +1379,11 @@ def init_agent(
         enabled_toolsets=enabled_toolsets,
         disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
+        tool_search_runtime={
+            "provider": agent.provider,
+            "base_url": agent.base_url,
+            "model": agent.model,
+        },
     )
     
     # Show tool configuration and store valid tool names for validation

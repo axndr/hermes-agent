@@ -3084,6 +3084,11 @@ class TestConcurrentToolExecution:
                 enabled_toolsets=agent.enabled_toolsets,
                 disabled_toolsets=agent.disabled_toolsets,
                 tool_request_middleware_trace=[],
+                tool_search_runtime={
+                    "provider": str(agent.provider or ""),
+                    "base_url": str(agent.base_url or ""),
+                    "model": str(agent.model or ""),
+                },
             )
             assert result == "result"
 
