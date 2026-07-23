@@ -834,16 +834,14 @@ def test_env_loader_calls_infisical_when_enabled(tmp_path, monkeypatch):
     )
     captured = {}
 
-    def fake_apply(**kwargs):
+    def fake_fetch(**kwargs):
         captured.update(kwargs)
-        return inf.FetchResult(
-            secrets={"K": "v"}, applied=["K"], skipped=[], warnings=[]
-        )
+        return {"K": "v"}, []
 
-    monkeypatch.setattr(
-        "agent.secret_sources.infisical.apply_infisical_secrets", fake_apply
-    )
-    monkeypatch.setenv("K", "")
+    monkeypatch.setenv("INFISICAL_TOKEN", "test-token")
+    monkeypatch.delenv("K", raising=False)
+    monkeypatch.setattr(inf, "find_infisical", lambda: Path("/fake/infisical"))
+    monkeypatch.setattr(inf, "fetch_infisical_secrets", fake_fetch)
     env_loader.reset_secret_source_cache()
     env_loader._apply_external_secret_sources(tmp_path)
 
@@ -852,6 +850,6 @@ def test_env_loader_calls_infisical_when_enabled(tmp_path, monkeypatch):
     assert captured["secret_path"] == "/svc"
     assert captured["server_url"] == "https://infisical.example.com"
     assert captured["cache_ttl_seconds"] == 120.0
-    assert captured["override_existing"] is False
+    assert inf.InfisicalSource().override_existing({"override_existing": False}) is False
     assert env_loader.get_secret_source("K") == "infisical"
     assert env_loader.format_secret_source_suffix("K") == " (from Infisical)"
