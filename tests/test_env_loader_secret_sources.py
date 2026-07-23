@@ -345,18 +345,20 @@ def test_apply_external_secret_sources_records_infisical_origin(tmp_path, monkey
         encoding="utf-8",
     )
 
-    from agent.secret_sources.infisical import FetchResult
+    from agent.secret_sources.base import FetchResult
+    from agent.secret_sources.infisical import InfisicalSource
+    from agent.secret_sources import registry as reg_module
 
-    fake_result = FetchResult(
-        secrets={"OPENAI_API_KEY": "sk-test"},
-        applied=["OPENAI_API_KEY"],
-    )
-
-    import agent.secret_sources.infisical as inf_module
-
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(
-        inf_module, "apply_infisical_secrets", lambda **_kw: fake_result
+        InfisicalSource,
+        "fetch",
+        lambda self, cfg, home_path: FetchResult(
+            secrets={"OPENAI_API_KEY": "sk-test"}
+        ),
     )
+    reg_module._reset_registry_for_tests()
+    env_loader.reset_secret_source_cache()
 
     env_loader._apply_external_secret_sources(tmp_path)
 
@@ -386,24 +388,27 @@ def test_apply_external_secret_sources_both_backends_enabled(tmp_path, monkeypat
         encoding="utf-8",
     )
 
-    from agent.secret_sources.bitwarden import FetchResult as BwResult
-    from agent.secret_sources.infisical import FetchResult as InfResult
-
-    import agent.secret_sources.bitwarden as bw_module
-    import agent.secret_sources.infisical as inf_module
+    from agent.secret_sources.base import FetchResult
+    from agent.secret_sources.bitwarden import BitwardenSource
+    from agent.secret_sources.infisical import InfisicalSource
+    from agent.secret_sources import registry as reg_module
 
     order = []
 
-    def _fake_bw(**_kw):
+    def _fake_bw(self, cfg, home_path):
         order.append("bitwarden")
-        return BwResult(secrets={"BW_KEY": "1"}, applied=["BW_KEY"])
+        return FetchResult(secrets={"BW_KEY": "1"})
 
-    def _fake_inf(**_kw):
+    def _fake_inf(self, cfg, home_path):
         order.append("infisical")
-        return InfResult(secrets={"INF_KEY": "2"}, applied=["INF_KEY"])
+        return FetchResult(secrets={"INF_KEY": "2"})
 
-    monkeypatch.setattr(bw_module, "apply_bitwarden_secrets", _fake_bw)
-    monkeypatch.setattr(inf_module, "apply_infisical_secrets", _fake_inf)
+    monkeypatch.delenv("BW_KEY", raising=False)
+    monkeypatch.delenv("INF_KEY", raising=False)
+    monkeypatch.setattr(BitwardenSource, "fetch", _fake_bw)
+    monkeypatch.setattr(InfisicalSource, "fetch", _fake_inf)
+    reg_module._reset_registry_for_tests()
+    env_loader.reset_secret_source_cache()
 
     env_loader._apply_external_secret_sources(tmp_path)
 
