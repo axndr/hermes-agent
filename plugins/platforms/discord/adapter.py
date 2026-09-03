@@ -8291,9 +8291,26 @@ class DiscordAdapter(BasePlatformAdapter):
         auto_threaded_channel = None
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels = self._get_no_thread_channels()
-            skip_thread = bool(channel_keys & no_thread_channels) or is_free_channel
+            # Free-response controls mention gating only; it should not disable
+            # auto-threading. Use no_thread_channels for channels that should
+            # respond directly in-channel.
+            skip_thread = bool(channel_keys & no_thread_channels)
             auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in {"true", "1", "yes"}
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
+            logger.info(
+                "[%s] Auto-thread decision: channel_id=%s channel_type=%s guild_id=%s parent_id=%s channel_ids=%s auto_thread=%s skip_thread=%s voice_linked=%s is_reply=%s msg_type=%s",
+                self.name,
+                getattr(message.channel, "id", None),
+                type(message.channel).__name__,
+                getattr(getattr(message, "guild", None), "id", None),
+                parent_channel_id,
+                sorted(channel_ids),
+                auto_thread,
+                skip_thread,
+                is_voice_linked_channel,
+                is_reply_message,
+                getattr(message, "type", None),
+            )
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
                 thread = await self._auto_create_thread(message)
                 if thread:
@@ -8312,7 +8329,18 @@ class DiscordAdapter(BasePlatformAdapter):
                     # event is dropped before it can trigger a second agent run.
                     # Fixes #51057.
                     self._dedup.is_duplicate(str(thread.id))
+                    logger.info(
+                        "[%s] Auto-thread created: parent=%s thread=%s",
+                        self.name,
+                        parent_channel_id,
+                        thread_id,
+                    )
                 else:
+                    logger.warning(
+                        "[%s] Auto-thread requested but no thread was created for channel_id=%s",
+                        self.name,
+                        getattr(message.channel, "id", None),
+                    )
                     # Auto-threading is the configured routing target for this
                     # message; if it fails we must NOT silently fall back to an
                     # inline parent-channel reply (#20243). That breaks
