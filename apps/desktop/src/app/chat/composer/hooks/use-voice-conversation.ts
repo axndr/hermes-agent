@@ -233,10 +233,11 @@ export function useVoiceConversation({
     }
 
     try {
-      // VAD tuning mirrors `tools.voice_mode` defaults so the browser loop matches the CLI.
+      // VAD tuning mirrors `tools.voice_mode` defaults so the browser loop matches the CLI,
+      // with a slightly longer post-speech pause to avoid clipping natural desktop voice turns.
       await handle.start({
         silenceLevel: 0.075,
-        silenceMs: 1_250,
+        silenceMs: 2_000,
         idleSilenceMs: 12_000,
         onError: error => {
           notifyError(error, voiceCopy.microphoneFailed)
