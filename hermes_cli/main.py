@@ -13756,15 +13756,15 @@ def main():
 
 
     # =========================================================================
-    # secrets command — external secret managers (Bitwarden, 1Password)
+    # secrets command — external secret managers
     # =========================================================================
     secrets_parser = subparsers.add_parser(
         "secrets",
-        help="Manage external secret sources (Bitwarden, 1Password)",
+        help="Manage external secret sources (Bitwarden, 1Password, Infisical)",
         description=(
             "Pull API keys from an external secret manager at process startup "
-            "instead of storing them in ~/.hermes/.env.  Supports Bitwarden "
-            "Secrets Manager and 1Password.  See: "
+            "instead of storing them in ~/.hermes/.env. Supports Bitwarden "
+            "Secrets Manager, 1Password, and Infisical. See: "
             "https://hermes-agent.nousresearch.com/docs/user-guide/secrets/"
         ),
     )
@@ -13781,6 +13781,11 @@ def main():
         aliases=["op", "1password"],
         help="1Password (op:// references) integration",
     )
+    secrets_inf = secrets_subparsers.add_parser(
+        "infisical",
+        aliases=["inf"],
+        help="Infisical integration",
+    )
 
     # Lazy-import secrets_cli: the module imports agent.secret_sources.bitwarden
     # which loads cryptography._rust.pyd.  On Windows this maps the native
@@ -13788,18 +13793,28 @@ def main():
     # defer (#86781).  secrets_cli defers its backend import to first use
     # (module-level __getattr__ + handler-level _load_bw()), so register_cli
     # at parse time only wires argparse structure with no crypto cost.
+
     from hermes_cli import secrets_cli as _secrets_cli
     from hermes_cli import onepassword_secrets_cli as _op_secrets_cli
+    from hermes_cli import secrets_infisical_cli as _secrets_infisical_cli
 
     _secrets_cli.register_cli(secrets_bw)
     _op_secrets_cli.register_cli(secrets_op)
+    _secrets_infisical_cli.register_cli(secrets_inf)
 
     def _dispatch_secrets(args):  # noqa: ANN001
         sub = getattr(args, "secrets_command", None)
-        if sub is None:
-            secrets_parser.print_help()
-            return 0
-        return args.func(args)
+        bw_sub = getattr(args, "secrets_bw_command", None)
+        op_sub = getattr(args, "secrets_op_command", None)
+        inf_sub = getattr(args, "secrets_inf_command", None)
+        if sub in ("bitwarden", "bw") and bw_sub is not None:
+            return args.func(args)
+        if sub in ("onepassword", "op", "1password") and op_sub is not None:
+            return args.func(args)
+        if sub in ("infisical", "inf") and inf_sub is not None:
+            return args.func(args)
+        secrets_parser.print_help()
+        return 0
 
     secrets_parser.set_defaults(func=_dispatch_secrets)
 
