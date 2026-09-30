@@ -45,6 +45,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/secrets/index',
             'user-guide/secrets/bitwarden',
             'user-guide/secrets/onepassword',
+            'user-guide/secrets/infisical',
           ],
         },
         {

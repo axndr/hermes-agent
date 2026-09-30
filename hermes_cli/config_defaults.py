@@ -2500,6 +2500,21 @@ DEFAULT_CONFIG = {
             # Overwrite existing env vars so rotation takes effect; False lets .env win.
             "override_existing": True,
         },
+        "infisical": {
+            # Bulk secret source for Infisical projects/folders. Bootstrap
+            # credentials remain in .env; fetched values are applied by the
+            # shared secret-source orchestrator with provenance/conflict guards.
+            "enabled": False,
+            "client_id_env": "INFISICAL_CLIENT_ID",
+            "client_secret_env": "INFISICAL_CLIENT_SECRET",
+            "token_env": "INFISICAL_TOKEN",
+            "project_id": "",
+            "environment": "",
+            "secret_path": "/",
+            "cache_ttl_seconds": 300,
+            "override_existing": True,
+            "server_url": "",
+        },
     },
     # Paste collapse thresholds (TUI + CLI); 0 disables each. threshold: bracketed pastes with this
     # many newlines collapse to a file reference. fallback: same test for terminals without
