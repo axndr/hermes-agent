@@ -276,6 +276,27 @@ def _installed_in(site_packages: Path, anchor: str) -> bool:
                for entry in parent.glob(f"{leaf}.*"))
 
 
+def _managed_marker_environment() -> dict[str, str] | None:
+    """Marker environment for the Python PM is about to install.
+
+    A main-era migration runs inside the old checkout venv. Evaluating an
+    extra's ``python_version`` gate against that process can carry an extra
+    which the new managed interpreter explicitly cannot install.
+    """
+    try:
+        from pm.plugin_eviction import _interpreter_version
+
+        version = _interpreter_version()
+    except Exception:
+        return None
+    parts = version.split(".")
+    environment = {
+        "python_full_version": version,
+        "python_version": ".".join(parts[:2]),
+    }
+    return environment
+
+
 def legacy_selection(project_root: Path) -> list[str]:
     """The extras PM's first generation selects when it replaces a main-era venv.
 
@@ -287,6 +308,7 @@ def legacy_selection(project_root: Path) -> list[str]:
     not run from it.
     """
     root = Path(project_root)
+    target_environment = _managed_marker_environment()
     trees = [tree for venv in (root / "venv", root / ".venv")
              for tree in (*venv.glob("lib/python*/site-packages"), venv / "Lib" / "site-packages")
              if tree.is_dir()]
@@ -297,6 +319,10 @@ def legacy_selection(project_root: Path) -> list[str]:
         # PM refuses a gated extra outside its platform even if a hand-synced venv carried it.
         # Installed first: judging a gate may cost a PM-runtime subprocess.
         if any(all(_installed_in(tree, anchor) for anchor in _anchors(extra)) for tree in trees)
-        and extra_supported(extra, importable=lambda _anchor: False)
+        and extra_supported(
+            extra,
+            environment=target_environment,
+            importable=lambda _anchor: False,
+        )
     )
     return ["all", *carried]
