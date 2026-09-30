@@ -7,6 +7,7 @@ import platform
 import shutil
 import stat
 import sys
+import copy
 import threading
 import tempfile
 import time
@@ -15,6 +16,43 @@ from pathlib import Path
 from typing import IO
 
 from pm.filesystem import is_junction
+
+
+def _ensure_tar_filter_errors(tarfile) -> None:
+    """Provide the PEP 706 exception names on pre-3.12 interpreters.
+
+    PM is responsible for installing Hermes' managed Python, so its bootstrap
+    extractor must run safely on the older system Python it is replacing.
+    """
+    if hasattr(tarfile, "FilterError"):
+        return
+
+    class FilterError(tarfile.TarError):
+        pass
+
+    class AbsoluteLinkError(FilterError):
+        pass
+
+    class LinkOutsideDestinationError(FilterError):
+        pass
+
+    class OutsideDestinationError(FilterError):
+        pass
+
+    class SpecialFileError(FilterError):
+        pass
+
+    tarfile.FilterError = FilterError
+    tarfile.AbsoluteLinkError = AbsoluteLinkError
+    tarfile.LinkOutsideDestinationError = LinkOutsideDestinationError
+    tarfile.OutsideDestinationError = OutsideDestinationError
+    tarfile.SpecialFileError = SpecialFileError
+
+
+# The test suite and callers use tarfile.FilterError as the public contract.
+# Install the compatibility names at module import on Python 3.11 and older.
+import tarfile as _tarfile
+_ensure_tar_filter_errors(_tarfile)
 
 
 
@@ -207,8 +245,43 @@ def _tar_filter(member, dest: str):
         for path in (placed, target):
             if os.path.commonpath([path, dest]) != dest:
                 raise tarfile.LinkOutsideDestinationError(member, path)
-        return member.replace(deep=False, uid=None, gid=None, uname=None, gname=None, mode=None)
-    return tarfile.data_filter(member, dest)
+        if hasattr(member, "replace"):
+            return member.replace(deep=False, uid=None, gid=None, uname=None, gname=None, mode=None)
+        filtered = copy.copy(member)
+        filtered.uid = filtered.gid = None
+        filtered.uname = filtered.gname = None
+        filtered.mode = None
+        return filtered
+    if hasattr(tarfile, "data_filter"):
+        return tarfile.data_filter(member, dest)
+
+    # PEP 706's data filter, reduced to the security-relevant behavior needed
+    # by package payloads. Revalidation happens immediately before each member
+    # is extracted, so paths traversing an earlier archive symlink are caught.
+    name = member.name.rstrip("/")
+    if os.path.isabs(name):
+        raise tarfile.OutsideDestinationError(member, name)
+    placed = os.path.realpath(os.path.join(dest, name))
+    if os.path.commonpath([placed, dest]) != dest:
+        raise tarfile.OutsideDestinationError(member, placed)
+    if member.islnk():
+        if os.path.isabs(member.linkname):
+            raise tarfile.AbsoluteLinkError(member)
+        target = os.path.realpath(os.path.join(dest, member.linkname))
+        if os.path.commonpath([target, dest]) != dest:
+            raise tarfile.LinkOutsideDestinationError(member, target)
+    if member.ischr() or member.isblk() or member.isfifo():
+        raise tarfile.SpecialFileError(member)
+
+    filtered = copy.copy(member)
+    filtered.uid = filtered.gid = None
+    filtered.uname = filtered.gname = None
+    if filtered.mode is not None:
+        filtered.mode &= 0o755
+        filtered.mode &= ~0o022
+        if filtered.isfile():
+            filtered.mode |= 0o600
+    return filtered
 
 def extract_tar(archive: Path | IO[bytes], dest: Path) -> None:
     """Extract a tarball (a path, or an open stream such as a .deb's data.tar)
@@ -221,7 +294,14 @@ def extract_tar(archive: Path | IO[bytes], dest: Path) -> None:
     real_dest = os.path.realpath(dest)
     opened = tarfile.open(archive) if isinstance(archive, (str, os.PathLike)) else tarfile.open(fileobj=archive)
     with opened as tf:
-        tf.extractall(dest, filter=lambda member, path: _tar_filter(member, real_dest))
+        if "filter" in __import__("inspect").signature(tf.extractall).parameters:
+            tf.extractall(dest, filter=lambda member, path: _tar_filter(member, real_dest))
+        else:
+            # Python <=3.11 has no extraction filter. Extract sequentially and
+            # revalidate against the live destination before every write, which
+            # also catches a later path routed through an earlier symlink.
+            for member in tf:
+                tf.extract(_tar_filter(member, real_dest), dest)
 
 
 def extract(archive: Path, dest: Path) -> None:

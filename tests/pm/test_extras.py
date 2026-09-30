@@ -222,6 +222,11 @@ def test_legacy_selection_carries_extras_the_main_era_venv_lazily_installed(monk
     image generation, a messaging SDK), or the first PM launch prompts to
     reinstall them. Umbrella and gated-off extras are never carried."""
     monkeypatch.setattr(extras, "_PLATFORM_GATES", {"piper": "python_version < '0'"})
+    monkeypatch.setattr(
+        extras,
+        "_managed_marker_environment",
+        lambda: {"python_version": "3.14", "python_full_version": "3.14.7"},
+    )
     site = tmp_path / "venv" / "lib" / "python3.11" / "site-packages"
     (site / "fal_client").mkdir(parents=True)
     (site / "telegram").mkdir()
@@ -239,6 +244,20 @@ def test_legacy_selection_carries_extras_the_main_era_venv_lazily_installed(monk
     assert "piper" not in selection
     assert "hindsight" not in selection  # Catalog plugin owns this dependency, not a core extra.
     assert extras.legacy_selection(tmp_path / "no-venv") == ["all"]
+
+
+def test_legacy_selection_uses_managed_python_for_extra_gates(monkeypatch, tmp_path):
+    """Do not carry an old-venv extra which the replacement Python excludes."""
+    monkeypatch.setattr(extras, "_PLATFORM_GATES", {"neutts": "python_version < '3.14'"})
+    monkeypatch.setattr(
+        extras,
+        "_managed_marker_environment",
+        lambda: {"python_version": "3.14", "python_full_version": "3.14.7"},
+    )
+    site = tmp_path / "venv" / "lib" / "python3.11" / "site-packages"
+    (site / "neutts").mkdir(parents=True)
+
+    assert "neutts" not in extras.legacy_selection(tmp_path)
 
 
 def test_runtime_marker_evaluation_answers_for_the_given_environment():
