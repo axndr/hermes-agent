@@ -60,8 +60,12 @@ def _run_helper(cmd: list, timeout: int) -> subprocess.CompletedProcess:
 def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     neutts_config = tts_config.get("neutts") or {}
     wav_path = _wav_sidecar_path(output_path)
+    # NeuTTS currently caps Python below 3.14, while Hermes' managed runtime is
+    # 3.14+. Allow synthesis to stay in a small legacy/sidecar environment
+    # without pinning the whole gateway to an obsolete interpreter.
+    python = str(neutts_config.get("python") or sys.executable)
     cmd = [
-        sys.executable, str(Path(__file__).parent / "neutts_synth.py"),
+        python, str(Path(__file__).parent / "neutts_synth.py"),
         "--text", text,
         "--out", wav_path,
         "--ref-audio", neutts_config.get("ref_audio", "") or str(_NEUTTS_SAMPLES / "jo.wav"),
