@@ -71,7 +71,6 @@ import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { ProfileProvider } from "@/contexts/ProfileProvider";
 import { useProfileScope } from "@/contexts/useProfileScope";
 import { ProfileSwitcher } from "@/components/ProfileSwitcher";
-import { ProfileScopeBanner } from "@/components/ProfileScopeBanner";
 import { MemoryPressureBanner } from "@/components/MemoryPressureBanner";
 import { MultiplexStandaloneBanner } from "@/components/MultiplexStandaloneBanner";
 import { useSystemActions } from "@/contexts/useSystemActions";
@@ -575,7 +574,6 @@ export default function App() {
           stacked three offsets (NS-656 review P3). One spacer, applied once. */}
       <div aria-hidden className="h-14 shrink-0 lg:hidden" />
       <PluginSlot name="header-banner" />
-      <ProfileScopeBanner />
       <MemoryPressureBanner status={sidebarStatus} />
       <MultiplexStandaloneBanner status={sidebarStatus} />
 
